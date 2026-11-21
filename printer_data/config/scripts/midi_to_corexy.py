@@ -524,7 +524,7 @@ def write_klipper_macro(
         f"  SAVE_GCODE_STATE NAME={macro_name.lower()}_state",
         "  G90",
         f"  G1 X{CENTER_X:.3f} Y{CENTER_Y:.3f} F9000",
-        "  _AUDIO_MODE_4MS_ON",
+        "  _AUDIO_MODE_COMPACTO_ON",
         "  G91",
     ]
     for ln in body_lines:
