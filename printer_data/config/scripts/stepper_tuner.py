@@ -237,15 +237,15 @@ def build_corexy_isolated_move(
     v_motor = target_hz / steps_per_mm_xy  # belt speed in mm/s
     v_toolhead = v_motor / math.sqrt(2.0)  # Cartesian diagonal speed in mm/s
     dist_motor = v_motor * dur             # belt travel in mm
-    # Axis travel per segment = dist_motor / 2; keep within +-25mm of center (50mm belt travel)
-    max_belt_seg = 50.0
+    # Axis travel per segment = dist_motor / 2; use longer segment at high speed to reach full cruise velocity
+    seg_belt = 90.0 if v_toolhead > 250.0 else 40.0
+    max_belt_seg = seg_belt + 10.0
     f_cmd = (v_toolhead * 60.0) / scale_xy
 
     if dist_motor > max_belt_seg:
-        n_segs = max(2, int(math.ceil(dist_motor / 40.0)))
+        n_segs = max(2, int(math.ceil(dist_motor / seg_belt)))
         if n_segs % 2 == 1:
             n_segs += 1  # even number of segments returns to exact center
-        seg_belt = 40.0
         axis_cmd = (seg_belt / 2.0) / scale_xy
         moves = ["G91"]
         d = direction
