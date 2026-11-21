@@ -1,9 +1,10 @@
 #!/home/shoomba/klippy-env/bin/python
 """
-Stepper Audio Tuner para Klipper (VZ180 AWD CoreXY)
-Usa o microfone da webcam USB (PipeWire/PulseAudio) para medir a frequencia
-acustica real emitida pelos motores de passo, calcular o fator de afinacao
-(em Hz e cents) e gerar a resposta de frequencia da estrutura da impressora.
+Stepper Audio Tuner para Klipper CoreXY AWD (VZ180)
+Afina cada grupo de motores CoreXY INDIVIDUALMENTE usando o microfone da webcam USB:
+  - Motor A (stepper_x + stepper_x1): diagonal +45 deg (dX = +d, dY = +d) -> Motor B parado
+  - Motor B (stepper_y + stepper_y1): diagonal -45 deg (dX = +d, dY = -d) -> Motor A parado
+  - Motor Z (stepper_z, opcional via --motors A,B,Z): movimento vertical isolado
 """
 
 from __future__ import annotations
@@ -141,18 +142,14 @@ def analyze_tone(
     noise_spec: np.ndarray,
     expected_hz: float,
 ) -> dict:
-    """Estimate dominant frequency, fundamental (HPS), SNR, and pitch deviation."""
-    # Trim first/last 15% to avoid acceleration/deceleration ramps
+    """Estimate dominant frequency, SNR, RMS volume, and pitch deviation."""
     trim = int(len(samples) * 0.15)
     core = samples[trim : len(samples) - trim] if len(samples) > 1000 else samples
     freqs, spec = compute_spectrum(core)
 
-    # Interpolate noise floor to match frequency grid and subtract
     noise_interp = np.interp(freqs, noise_freqs, noise_spec)
-    # Normalize noise floor to same window length ratio
     clean_spec = np.maximum(spec - 1.5 * noise_interp, 0.0)
 
-    # Parabolic interpolation around peak for sub-Hz precision
     peak_idx = int(np.argmax(clean_spec))
     peak_mag = float(clean_spec[peak_idx])
     median_floor = float(np.median(clean_spec) + 1e-9)
@@ -160,27 +157,12 @@ def analyze_tone(
 
     if 0 < peak_idx < len(clean_spec) - 1:
         y0, y1, y2 = clean_spec[peak_idx - 1], clean_spec[peak_idx], clean_spec[peak_idx + 1]
-        denom = (y0 - 2 * y1 + y2)
+        denom = y0 - 2 * y1 + y2
         delta = 0.5 * (y0 - y2) / denom if abs(denom) > 1e-12 else 0.0
         step = freqs[1] - freqs[0]
         peak_hz = float(freqs[peak_idx] + delta * step)
     else:
         peak_hz = float(freqs[peak_idx])
-
-    # Also check energy specifically near harmonic multiples (0.25x, 0.5x, 1x, 2x, 4x)
-    candidates = {}
-    for mult in (0.25, 0.5, 1.0, 2.0, 4.0):
-        target = expected_hz * mult
-        if freqs[0] <= target <= freqs[-1]:
-            win = (freqs >= target * 0.94) & (freqs <= target * 1.06)
-            if np.any(win):
-                sub_idx = int(np.argmax(clean_spec[win]))
-                sub_freqs = freqs[win]
-                sub_mags = clean_spec[win]
-                candidates[str(mult)] = {
-                    "hz": round(float(sub_freqs[sub_idx]), 2),
-                    "mag": round(float(sub_mags[sub_idx]), 4),
-                }
 
     ratio = peak_hz / expected_hz if expected_hz > 0 else 0.0
     note_name, cents_nearest = hz_to_note_name(peak_hz)
@@ -196,139 +178,145 @@ def analyze_tone(
         "ratio": round(ratio, 4),
         "snr_db": round(snr_db, 1),
         "rms_db": round(rms_db, 1),
-        "harmonic_candidates": candidates,
     }
 
 
-def get_printer_microsteps() -> int:
+def get_stepper_settings() -> dict:
     res = moonraker_get("/printer/objects/query?configfile")
-    settings = res["result"]["status"]["configfile"]["settings"]
-    return int(settings["stepper_x"]["microsteps"])
+    return res["result"]["status"]["configfile"]["settings"]
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser(description="Afinador acustico de motores de passo via microfone da webcam")
-    parser.add_argument("--source", default=None, help="Fonte PulseAudio/PipeWire do microfone (auto-detectado por padrao)")
-    parser.add_argument("--duration", type=float, default=0.45, help="Duracao de cada nota de teste em segundos (padrao: 0.45)")
-    parser.add_argument("--no-audio-mode", action="store_true", help="Nao ativar _AUDIO_MODE_ON (testar no modo normal)")
-    parser.add_argument("--steps-per-mm", type=float, default=5.0, help="Passos cheios por mm (padrao: 5.0 para 200 passos / 40mm)")
-    args = parser.parse_args()
+def build_corexy_isolated_move(
+    motor: str,
+    target_hz: float,
+    dur: float,
+    steps_per_mm_xy: float,
+    scale_xy: float,
+    direction: int,
+) -> tuple[str, float]:
+    """
+    Build G-code that spins ONLY CoreXY Motor A (dX=+d, dY=+d) or Motor B (dX=+d, dY=-d).
+    In CoreXY:
+      dA = dX + dY,  dB = dX - dY
+      For Motor A only: dX = +dA/2, dY = +dA/2 -> dB = 0, toolhead speed = vA / sqrt(2)
+      For Motor B only: dX = +dB/2, dY = -dB/2 -> dA = 0, toolhead speed = vB / sqrt(2)
+    """
+    y_sign = 1.0 if motor == "A" else -1.0
+    v_motor = target_hz / steps_per_mm_xy  # belt speed in mm/s
+    v_toolhead = v_motor / math.sqrt(2.0)  # Cartesian diagonal speed in mm/s
+    dist_motor = v_motor * dur             # belt travel in mm
+    # Axis travel per segment = dist_motor / 2; keep within +-25mm of center (50mm belt travel)
+    max_belt_seg = 50.0
+    f_cmd = (v_toolhead * 60.0) / scale_xy
 
-    source = args.source or find_camera_mic()
-    print(f"[Microfone] Usando: {source}")
+    if dist_motor > max_belt_seg:
+        n_segs = max(2, int(math.ceil(dist_motor / 40.0)))
+        if n_segs % 2 == 1:
+            n_segs += 1  # even number of segments returns to exact center
+        seg_belt = 40.0
+        axis_cmd = (seg_belt / 2.0) / scale_xy
+        moves = ["G91"]
+        d = direction
+        for _ in range(n_segs):
+            moves.append(f"G1 X{d * axis_cmd:.4f} Y{d * y_sign * axis_cmd:.4f} F{f_cmd:.2f}")
+            d = -d
+        moves.append("M400")
+        rec_dur = (n_segs * seg_belt / v_motor) + 0.14
+        return "\n".join(moves), rec_dur
 
-    info = moonraker_get("/printer/info")["result"]
-    if info["state"] != "ready":
-        print(f"ERRO: Klipper nao esta pronto (state={info['state']}).")
-        return 1
+    axis_cmd = (dist_motor / 2.0) / scale_xy
+    gcode = (
+        f"G91\n"
+        f"G1 X{direction * axis_cmd:.4f} Y{direction * y_sign * axis_cmd:.4f} F{f_cmd:.2f}\n"
+        f"G1 X{-direction * axis_cmd:.4f} Y{-direction * y_sign * axis_cmd:.4f} F{f_cmd:.2f}\n"
+        f"M400"
+    )
+    rec_dur = (dur * 2.0) + 0.14
+    return gcode, rec_dur
 
-    orig_ms = get_printer_microsteps()
-    use_audio_mode = not args.no_audio_mode
-    scale = (orig_ms / 4.0) if use_audio_mode else 1.0
-    print(f"[Klipper] microsteps={orig_ms} | _AUDIO_MODE_ON={use_audio_mode} | scale={scale}")
 
-    print("[Ruido Ambiente] Gravando referencia de silencio (0.8s)...")
-    noise_samples = record_audio(source, 0.8)
-    noise_freqs, noise_spec = compute_spectrum(noise_samples)
-    noise_rms = 20.0 * math.log10(float(np.sqrt(np.mean(noise_samples ** 2))) + 1e-9)
-    print(f"[Ruido Ambiente] Nivel RMS: {noise_rms:.1f} dBFS")
+def build_z_isolated_move(
+    target_hz: float,
+    dur: float,
+    steps_per_mm_z: float,
+    direction: int,
+) -> tuple[str, float]:
+    """Build isolated vertical Z move oscillating safely around current Z."""
+    v_z = target_hz / steps_per_mm_z  # mm/s
+    dist_z = min(v_z * dur, 10.0)
+    f_cmd = v_z * 60.0
+    actual_dur = dist_z / v_z if v_z > 0 else dur
+    gcode = (
+        f"G91\n"
+        f"G1 Z{direction * dist_z:.4f} F{f_cmd:.2f}\n"
+        f"G1 Z{-direction * dist_z:.4f} F{f_cmd:.2f}\n"
+        f"M400"
+    )
+    return gcode, (actual_dur * 2.0) + 0.14
 
-    # Home XY if needed and center toolhead
-    homed = moonraker_get("/printer/objects/query?toolhead")["result"]["status"]["toolhead"]["homed_axes"]
-    if "x" not in homed or "y" not in homed:
-        print("[Klipper] Fazendo home X Y...")
-        run_gcode("G28 X Y", timeout=60.0)
 
-    run_gcode("G90\nG1 X90 Y87 F9000\nM400")
+def tune_single_motor(
+    motor: str,
+    source: str,
+    noise_freqs: np.ndarray,
+    noise_spec: np.ndarray,
+    dur: float,
+    steps_per_mm_xy: float,
+    steps_per_mm_z: float,
+    scale_xy: float,
+) -> dict:
+    label_map = {
+        "A": "Motor A (stepper_x + stepper_x1, diagonal +45 deg, B parado)",
+        "B": "Motor B (stepper_y + stepper_y1, diagonal -45 deg, A parado)",
+        "Z": "Motor Z (stepper_z, vertical isolado)",
+    }
+    print(f"\n=== Afinando {label_map[motor]} ===")
+    print("Nota | Alvo (Hz) | Medido (Hz) | Nota Real | Ratio  | Desvio (cents) | SNR (dB) | RMS (dB)")
+    print("-" * 92)
 
     results = []
     direction = 1
-    try:
-        if use_audio_mode:
-            run_gcode("_AUDIO_MODE_ON")
-
-        print("\nNota | Alvo (Hz) | Medido (Hz) | Nota Real | Ratio  | Desvio (cents) | SNR (dB) | RMS (dB)")
-        print("-" * 92)
-
-        for note_label, target_hz in TEST_NOTES:
-            # Physical speed for target_hz at steps_per_mm full steps/mm
-            v_phys = target_hz / args.steps_per_mm  # mm/s
-            # Keep physical travel within +-30mm around center by capping or oscillating
-            dur = args.duration
-            dist_phys = v_phys * dur
-            if dist_phys > 50.0:
-                # Split into back-and-forth segments of 40mm each so we never leave the center
-                seg_dist = 35.0
-                n_segs = max(2, int(math.ceil(dist_phys / seg_dist)))
-                seg_cmd = seg_dist / scale
-                f_cmd = (v_phys * 60.0) / scale
-                moves = ["G91"]
-                d = direction
-                for _ in range(n_segs):
-                    moves.append(f"G1 X{d * seg_cmd:.4f} F{f_cmd:.2f}")
-                    d = -d
-                if n_segs % 2 == 1:
-                    moves.append(f"G1 X{d * seg_cmd:.4f} F{f_cmd:.2f}")
-                moves.append("M400")
-                gcode = "\n".join(moves)
-                rec_dur = (n_segs * seg_dist / v_phys) + 0.12
-            else:
-                dist_cmd = dist_phys / scale
-                f_cmd = (v_phys * 60.0) / scale
-                # Move out and back to stay centered at X90
-                gcode = (
-                    f"G91\n"
-                    f"G1 X{direction * dist_cmd:.4f} F{f_cmd:.2f}\n"
-                    f"G1 X{-direction * dist_cmd:.4f} F{f_cmd:.2f}\n"
-                    f"M400"
-                )
-                rec_dur = (dur * 2.0) + 0.12
-
-            # Record in background thread while G-code plays so pipe never blocks
-            rec_holder: list[np.ndarray] = []
-
-            def _rec_worker() -> None:
-                rec_holder.append(record_audio(source, rec_dur))
-
-            t_rec = threading.Thread(target=_rec_worker, daemon=True)
-            t_rec.start()
-            time.sleep(0.06)
-            run_gcode(gcode)
-            t_rec.join(timeout=rec_dur + 3.0)
-            samples = rec_holder[0] if rec_holder else np.zeros(1, dtype=np.float64)
-            analysis = analyze_tone(samples, noise_freqs, noise_spec, target_hz)
-            analysis["target_note"] = note_label
-            results.append(analysis)
-
-            print(
-                f"{note_label:<4} | {target_hz:9.2f} | {analysis['measured_peak_hz']:11.2f} | "
-                f"{analysis['measured_note']:<9} | {analysis['ratio']:6.3f} | "
-                f"{analysis['cents_vs_expected']:+14.1f} | {analysis['snr_db']:8.1f} | {analysis['rms_db']:8.1f}"
+    for note_label, target_hz in TEST_NOTES:
+        if motor in ("A", "B"):
+            gcode, rec_dur = build_corexy_isolated_move(
+                motor, target_hz, dur, steps_per_mm_xy, scale_xy, direction
             )
-            direction = -direction
-            time.sleep(0.15)
-
-    finally:
-        if use_audio_mode:
-            run_gcode("G90\n_AUDIO_MODE_OFF")
         else:
-            run_gcode("G90")
+            gcode, rec_dur = build_z_isolated_move(target_hz, dur, steps_per_mm_z, direction)
 
-    # Compute median ratio across valid detections (SNR > 8 dB)
+        rec_holder: list[np.ndarray] = []
+
+        def _rec_worker() -> None:
+            rec_holder.append(record_audio(source, rec_dur))
+
+        t_rec = threading.Thread(target=_rec_worker, daemon=True)
+        t_rec.start()
+        time.sleep(0.06)
+        run_gcode(gcode)
+        t_rec.join(timeout=rec_dur + 3.0)
+        samples = rec_holder[0] if rec_holder else np.zeros(1, dtype=np.float64)
+
+        analysis = analyze_tone(samples, noise_freqs, noise_spec, target_hz)
+        analysis["target_note"] = note_label
+        results.append(analysis)
+
+        print(
+            f"{note_label:<4} | {target_hz:9.2f} | {analysis['measured_peak_hz']:11.2f} | "
+            f"{analysis['measured_note']:<9} | {analysis['ratio']:6.3f} | "
+            f"{analysis['cents_vs_expected']:+14.1f} | {analysis['snr_db']:8.1f} | {analysis['rms_db']:8.1f}"
+        )
+        direction = -direction
+        time.sleep(0.15)
+
     valid = [r for r in results if r["snr_db"] >= 8.0]
     ratios = [r["ratio"] for r in valid] if valid else [r["ratio"] for r in results]
     median_ratio = float(np.median(ratios)) if ratios else 1.0
     correction_factor = 1.0 / median_ratio if median_ratio > 0 else 1.0
-
-    # Find loudest resonant note
     loudest = max(results, key=lambda r: r["rms_db"]) if results else None
 
-    summary = {
-        "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
-        "mic_source": source,
-        "microsteps_config": orig_ms,
-        "audio_mode_4ms_1p7a": use_audio_mode,
-        "noise_floor_rms_db": round(noise_rms, 1),
+    print(f"--> Motor {motor}: Razao mediana = {median_ratio:.4f}x | Multiplicador F = {correction_factor:.4f}x")
+    return {
+        "description": label_map[motor],
         "median_measured_to_commanded_ratio": round(median_ratio, 4),
         "recommended_feedrate_multiplier": round(correction_factor, 4),
         "loudest_resonance": {
@@ -338,14 +326,89 @@ def main() -> int:
         } if loudest else None,
         "notes": results,
     }
-    CALIBRATION_OUT.write_text(json.dumps(summary, indent=2), encoding="utf-8")
 
-    print("\n=== RESUMO DA AFINACAO ===")
-    print(f"Razao mediana (Medido / Comandado): {median_ratio:.4f}x")
-    print(f"Fator de correcao recomendado no Feedrate (F): {correction_factor:.4f}x")
-    if loudest:
-        print(f"Melhor ressonancia da estrutura: {loudest['target_note']} ({loudest['measured_peak_hz']} Hz, {loudest['rms_db']} dBFS)")
-    print(f"Calibracao salva em: {CALIBRATION_OUT}")
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Afinador acustico individual de motores CoreXY via microfone da webcam")
+    parser.add_argument("--source", default=None, help="Fonte PulseAudio/PipeWire do microfone")
+    parser.add_argument("--motors", default="A,B", help="Motores para afinar separados por virgula (ex: A,B ou A,B,Z)")
+    parser.add_argument("--duration", type=float, default=0.40, help="Duracao por nota em segundos (padrao: 0.40)")
+    parser.add_argument("--no-audio-mode", action="store_true", help="Nao ativar _AUDIO_MODE_ON")
+    args = parser.parse_args()
+
+    motors = [m.strip().upper() for m in args.motors.split(",") if m.strip().upper() in ("A", "B", "Z")]
+    if not motors:
+        print("ERRO: informe --motors com A, B e/ou Z.")
+        return 1
+
+    source = args.source or find_camera_mic()
+    print(f"[Microfone] Usando: {source}")
+
+    info = moonraker_get("/printer/info")["result"]
+    if info["state"] != "ready":
+        print(f"ERRO: Klipper nao esta pronto (state={info['state']}).")
+        return 1
+
+    cfg = get_stepper_settings()
+    orig_ms_xy = int(cfg["stepper_x"]["microsteps"])
+    rot_xy = float(cfg["stepper_x"]["rotation_distance"])
+    steps_per_mm_xy = 200.0 / rot_xy
+    rot_z = float(cfg["stepper_z"]["rotation_distance"])
+    steps_per_mm_z = 200.0 / rot_z
+
+    use_audio_mode = not args.no_audio_mode
+    scale_xy = (orig_ms_xy / 4.0) if use_audio_mode else 1.0
+    print(f"[Klipper] XY microsteps={orig_ms_xy} ({steps_per_mm_xy:.2f} passos/mm) | _AUDIO_MODE_ON={use_audio_mode} | scale={scale_xy}")
+
+    print("[Ruido Ambiente] Gravando referencia de silencio (0.8s)...")
+    noise_samples = record_audio(source, 0.8)
+    noise_freqs, noise_spec = compute_spectrum(noise_samples)
+    noise_rms = 20.0 * math.log10(float(np.sqrt(np.mean(noise_samples ** 2))) + 1e-9)
+    print(f"[Ruido Ambiente] Nivel RMS: {noise_rms:.1f} dBFS")
+
+    homed = moonraker_get("/printer/objects/query?toolhead")["result"]["status"]["toolhead"]["homed_axes"]
+    if ("A" in motors or "B" in motors) and ("x" not in homed or "y" not in homed):
+        print("[Klipper] Fazendo home X Y...")
+        run_gcode("G28 X Y", timeout=60.0)
+    if "Z" in motors and "z" not in homed:
+        print("[Klipper] Fazendo home Z...")
+        run_gcode("G28 Z", timeout=60.0)
+
+    if "A" in motors or "B" in motors:
+        run_gcode("G90\nG1 X90 Y87 F9000\nM400")
+    if "Z" in motors:
+        run_gcode("G90\nG1 Z35 F1800\nM400")
+
+    motor_results = {}
+    audio_enabled = False
+    try:
+        if use_audio_mode and ("A" in motors or "B" in motors):
+            run_gcode("_AUDIO_MODE_ON")
+            audio_enabled = True
+
+        for m in motors:
+            if m == "Z" and audio_enabled:
+                run_gcode("G90\n_AUDIO_MODE_OFF")
+                audio_enabled = False
+            motor_results[f"motor_{m}"] = tune_single_motor(
+                m, source, noise_freqs, noise_spec, args.duration, steps_per_mm_xy, steps_per_mm_z, scale_xy
+            )
+    finally:
+        if audio_enabled:
+            run_gcode("G90\n_AUDIO_MODE_OFF")
+        else:
+            run_gcode("G90")
+
+    summary = {
+        "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "mic_source": source,
+        "microsteps_xy_config": orig_ms_xy,
+        "audio_mode_4ms_1p7a": use_audio_mode,
+        "noise_floor_rms_db": round(noise_rms, 1),
+        "motors": motor_results,
+    }
+    CALIBRATION_OUT.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+    print(f"\nCalibracao individual salva em: {CALIBRATION_OUT}")
     return 0
 
 
