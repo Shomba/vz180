@@ -283,8 +283,7 @@ def arrange_megalovania(
             # Check if bass_out overlaps [s, e)
             overlaps = any(bs < e and be > s for bs, be, _ in bass_out)
             if not overlaps:
-                ph = ((s // bar_ticks) // 4) * 4
-                p_adj = clamp_octave(p + phrase_shifts.get(ph, 0), LEAD_MIN_MIDI, LEAD_MAX_MIDI)
+                p_adj = clamp_octave(p, LEAD_MIN_MIDI, LEAD_MAX_MIDI)
                 bass_out.append((s, e, p_adj))
         bass_out.sort()
 
