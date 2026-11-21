@@ -197,7 +197,7 @@ def main() -> int:
     vB_w.append((s_tk, e_tk, 63))
     vZ_w.append((s_tk, e_tk, 70))
 
-    w_lines, w_stats = bac.compile_3axis_gcode(vA_w, vB_w, vZ_w, div_d, tempos_d)
+    w_lines, w_stats = bac.compile_3axis_gcode(vA_w, vB_w, vZ_w, div_d, tempos_d, add_ending_chord=False)
     print(f"[WEEZER 9-Note Riff 3-Axis] {w_stats}")
 
     weezer_macro = "\n".join([

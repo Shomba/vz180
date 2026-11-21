@@ -266,6 +266,7 @@ def compile_3axis_gcode(
     orig_ms_xy: int = 16,
     rot_xy: float = 40.0,
     target_ms_xy: int = 4,
+    add_ending_chord: bool = True,
 ) -> tuple[list[str], dict]:
     """
     Compile 3-voice (Motor A + Motor B + Motor Z) timeline into G1 X Y Z / G4 G-code
@@ -305,7 +306,7 @@ def compile_3axis_gcode(
         pZ = voice_Z[iZ][2] if (iZ < len(voice_Z) and voice_Z[iZ][0] <= t_mid < voice_Z[iZ][1]) else None
         segments.append((t2s(tk0), t2s(tk1), pA, pB, pZ, tk0 in starts_A, tk0 in starts_B, tk0 in starts_Z))
 
-    if segments:
+    if add_ending_chord and segments:
         t_end = segments[-1][1]
         # Final 3-voice D# minor power resolve: D#5 (A) + A#3 (B) + F#5 (Z)
         segments.append((t_end, t_end + 0.05, None, None, None, False, False, False))
