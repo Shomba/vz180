@@ -1,14 +1,30 @@
 {
   "belt_a": {
     "belt": "A",
-    "hz": 73.8,
-    "note": "D2 (+9c)",
-    "tension_n": 2.7,
-    "snr_db": 22.8,
-    "timestamp": "20:34:38"
+    "hz": 69.5,
+    "note": "C#2 (+5c)",
+    "tension_n": 2.39,
+    "snr_db": 21.6,
+    "timestamp": "20:34:47"
   },
   "belt_b": null,
   "history": [
+    {
+      "belt": "A",
+      "hz": 69.5,
+      "note": "C#2 (+5c)",
+      "tension_n": 2.39,
+      "snr_db": 21.6,
+      "timestamp": "20:34:47"
+    },
+    {
+      "belt": "A",
+      "hz": 71.3,
+      "note": "C#2 (+49c)",
+      "tension_n": 2.52,
+      "snr_db": 22.7,
+      "timestamp": "20:34:39"
+    },
     {
       "belt": "A",
       "hz": 73.8,
