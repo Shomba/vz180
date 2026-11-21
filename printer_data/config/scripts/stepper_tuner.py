@@ -70,6 +70,8 @@ OCTAVE_NOTES_Z = [
     ("G6", 1567.98),
     ("C7", 2093.00),
     ("F7", 2793.83),
+    ("G7", 3135.96),
+    ("A#7", 3729.31),
 ]
 
 
@@ -271,17 +273,19 @@ def build_z_isolated_move(
     target_hz: float,
     dur: float,
     steps_per_mm_z: float,
+    scale_z: float,
     direction: int,
 ) -> tuple[str, float]:
     """Build isolated vertical Z move oscillating safely around current Z."""
-    v_z = target_hz / steps_per_mm_z  # mm/s
-    dist_z = min(v_z * dur, 10.0)
-    f_cmd = v_z * 60.0
-    actual_dur = dist_z / v_z if v_z > 0 else dur
+    v_z = target_hz / steps_per_mm_z  # physical mm/s
+    dist_phys = min(v_z * dur, 15.0)
+    dist_cmd = dist_phys / scale_z
+    f_cmd = (v_z * 60.0) / scale_z
+    actual_dur = dist_phys / v_z if v_z > 0 else dur
     gcode = (
         f"G91\n"
-        f"G1 Z{direction * dist_z:.4f} F{f_cmd:.2f}\n"
-        f"G1 Z{-direction * dist_z:.4f} F{f_cmd:.2f}\n"
+        f"G1 Z{direction * dist_cmd:.4f} F{f_cmd:.2f}\n"
+        f"G1 Z{-direction * dist_cmd:.4f} F{f_cmd:.2f}\n"
         f"M400"
     )
     return gcode, (actual_dur * 2.0) + 0.14
@@ -296,9 +300,10 @@ def tune_single_motor(
     steps_per_mm_xy: float,
     steps_per_mm_z: float,
     scale_xy: float,
+    scale_z: float = 1.0,
     mode: str = "standard",
     max_xy_vel: float = 800.0,
-    max_z_vel: float = 80.0,
+    max_z_vel: float = 100.0,
 ) -> dict:
     label_map = {
         "A": "Motor A (stepper_x + stepper_x1, diagonal +45 deg, B parado)",
