@@ -379,7 +379,10 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Afinador acustico individual de motores CoreXY via microfone da webcam")
     parser.add_argument("--source", default=None, help="Fonte PulseAudio/PipeWire do microfone")
     parser.add_argument("--motors", default="A,B", help="Motores para afinar separados por virgula (ex: A,B ou A,B,Z)")
-    parser.add_argument("--duration", type=float, default=0.40, help="Duracao por nota em segundos (padrao: 0.40)")
+    parser.add_argument("--mode", choices=["standard", "octaves"], default="standard", help="Modo: standard (C4-A5) ou octaves (C2-E8)")
+    parser.add_argument("--max-xy-vel", type=float, default=800.0, help="Velocidade maxima XY fisica em mm/s (padrao: 800)")
+    parser.add_argument("--max-z-vel", type=float, default=100.0, help="Velocidade maxima Z fisica em mm/s (padrao: 100)")
+    parser.add_argument("--duration", type=float, default=0.35, help="Duracao por nota em segundos (padrao: 0.35)")
     parser.add_argument("--no-audio-mode", action="store_true", help="Nao ativar _AUDIO_MODE_ON")
     args = parser.parse_args()
 
@@ -402,6 +405,8 @@ def main() -> int:
     steps_per_mm_xy = 200.0 / rot_xy
     rot_z = float(cfg["stepper_z"]["rotation_distance"])
     steps_per_mm_z = 200.0 / rot_z
+    klipper_max_z_vel = float(cfg["printer"].get("max_z_velocity", 80.0))
+    eff_max_z_vel = min(args.max_z_vel, klipper_max_z_vel)
 
     use_audio_mode = not args.no_audio_mode
     scale_xy = (orig_ms_xy / 4.0) if use_audio_mode else 1.0
@@ -438,7 +443,8 @@ def main() -> int:
                 run_gcode("G90\n_AUDIO_MODE_OFF")
                 audio_enabled = False
             motor_results[f"motor_{m}"] = tune_single_motor(
-                m, source, noise_freqs, noise_spec, args.duration, steps_per_mm_xy, steps_per_mm_z, scale_xy
+                m, source, noise_freqs, noise_spec, args.duration, steps_per_mm_xy, steps_per_mm_z, scale_xy,
+                mode=args.mode, max_xy_vel=args.max_xy_vel, max_z_vel=eff_max_z_vel,
             )
     finally:
         if audio_enabled:
