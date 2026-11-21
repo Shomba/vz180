@@ -1,264 +1,209 @@
 {
-  "timestamp": "2026-11-21 17:47:10",
+  "timestamp": "2026-11-21 17:51:36",
   "mic_source": "alsa_input.usb-YJXU502S_USB_Camera_20190415-02.mono-fallback",
-  "microsteps_config": 16,
+  "microsteps_xy_config": 16,
   "audio_mode_4ms_1p7a": true,
-  "noise_floor_rms_db": -28.4,
-  "median_measured_to_commanded_ratio": 1.5009,
-  "recommended_feedrate_multiplier": 0.6663,
-  "loudest_resonance": {
-    "note": "C4",
-    "measured_hz": 392.25,
-    "rms_db": -14.0
-  },
-  "notes": [
-    {
-      "expected_hz": 261.63,
-      "measured_peak_hz": 392.25,
-      "measured_note": "G4",
-      "cents_from_nearest_note": 1.1,
-      "cents_vs_expected": 701.1,
-      "ratio": 1.4993,
-      "snr_db": 44.6,
-      "rms_db": -14.0,
-      "harmonic_candidates": {
-        "0.5": {
-          "hz": 127.26,
-          "mag": 7.7116
-        },
-        "1.0": {
-          "hz": 271.73,
-          "mag": 134.8817
-        },
-        "2.0": {
-          "hz": 553.34,
-          "mag": 88.2707
-        },
-        "4.0": {
-          "hz": 1079.22,
-          "mag": 122.1632
-        }
+  "noise_floor_rms_db": -27.6,
+  "motors": {
+    "motor_A": {
+      "description": "Motor A (stepper_x + stepper_x1, diagonal +45 deg, B parado)",
+      "median_measured_to_commanded_ratio": 1.0002,
+      "recommended_feedrate_multiplier": 0.9998,
+      "loudest_resonance": {
+        "note": "E4",
+        "measured_hz": 659.31,
+        "rms_db": -10.5
       },
-      "target_note": "C4"
+      "notes": [
+        {
+          "expected_hz": 261.63,
+          "measured_peak_hz": 261.12,
+          "measured_note": "C4",
+          "cents_from_nearest_note": -3.4,
+          "cents_vs_expected": -3.4,
+          "ratio": 0.998,
+          "snr_db": 41.2,
+          "rms_db": -11.4,
+          "target_note": "C4"
+        },
+        {
+          "expected_hz": 329.63,
+          "measured_peak_hz": 659.31,
+          "measured_note": "E5",
+          "cents_from_nearest_note": 0.1,
+          "cents_vs_expected": 1200.1,
+          "ratio": 2.0001,
+          "snr_db": 49.6,
+          "rms_db": -10.5,
+          "target_note": "E4"
+        },
+        {
+          "expected_hz": 392.0,
+          "measured_peak_hz": 392.21,
+          "measured_note": "G4",
+          "cents_from_nearest_note": 0.9,
+          "cents_vs_expected": 0.9,
+          "ratio": 1.0005,
+          "snr_db": 44.2,
+          "rms_db": -15.0,
+          "target_note": "G4"
+        },
+        {
+          "expected_hz": 440.0,
+          "measured_peak_hz": 440.1,
+          "measured_note": "A4",
+          "cents_from_nearest_note": 0.4,
+          "cents_vs_expected": 0.4,
+          "ratio": 1.0002,
+          "snr_db": 44.2,
+          "rms_db": -14.7,
+          "target_note": "A4"
+        },
+        {
+          "expected_hz": 523.25,
+          "measured_peak_hz": 523.4,
+          "measured_note": "C5",
+          "cents_from_nearest_note": 0.5,
+          "cents_vs_expected": 0.5,
+          "ratio": 1.0003,
+          "snr_db": 45.4,
+          "rms_db": -17.4,
+          "target_note": "C5"
+        },
+        {
+          "expected_hz": 659.25,
+          "measured_peak_hz": 659.31,
+          "measured_note": "E5",
+          "cents_from_nearest_note": 0.1,
+          "cents_vs_expected": 0.2,
+          "ratio": 1.0001,
+          "snr_db": 43.8,
+          "rms_db": -19.8,
+          "target_note": "E5"
+        },
+        {
+          "expected_hz": 783.99,
+          "measured_peak_hz": 783.69,
+          "measured_note": "G5",
+          "cents_from_nearest_note": -0.7,
+          "cents_vs_expected": -0.7,
+          "ratio": 0.9996,
+          "snr_db": 31.9,
+          "rms_db": -21.2,
+          "target_note": "G5"
+        },
+        {
+          "expected_hz": 880.0,
+          "measured_peak_hz": 881.75,
+          "measured_note": "A5",
+          "cents_from_nearest_note": 3.4,
+          "cents_vs_expected": 3.4,
+          "ratio": 1.002,
+          "snr_db": 32.9,
+          "rms_db": -21.0,
+          "target_note": "A5"
+        }
+      ]
     },
-    {
-      "expected_hz": 329.63,
-      "measured_peak_hz": 495.39,
-      "measured_note": "B4",
-      "cents_from_nearest_note": 5.3,
-      "cents_vs_expected": 705.3,
-      "ratio": 1.5029,
-      "snr_db": 44.8,
-      "rms_db": -16.0,
-      "harmonic_candidates": {
-        "0.5": {
-          "hz": 160.4,
-          "mag": 5.9342
-        },
-        "1.0": {
-          "hz": 339.29,
-          "mag": 69.3697
-        },
-        "2.0": {
-          "hz": 689.21,
-          "mag": 196.4094
-        },
-        "4.0": {
-          "hz": 1359.92,
-          "mag": 69.371
-        }
+    "motor_B": {
+      "description": "Motor B (stepper_y + stepper_y1, diagonal -45 deg, A parado)",
+      "median_measured_to_commanded_ratio": 1.0,
+      "recommended_feedrate_multiplier": 1.0001,
+      "loudest_resonance": {
+        "note": "C4",
+        "measured_hz": 261.45,
+        "rms_db": -9.7
       },
-      "target_note": "E4"
-    },
-    {
-      "expected_hz": 392.0,
-      "measured_peak_hz": 588.31,
-      "measured_note": "D5",
-      "cents_from_nearest_note": 2.9,
-      "cents_vs_expected": 702.9,
-      "ratio": 1.5008,
-      "snr_db": 41.6,
-      "rms_db": -18.7,
-      "harmonic_candidates": {
-        "0.5": {
-          "hz": 189.51,
-          "mag": 11.8054
+      "notes": [
+        {
+          "expected_hz": 261.63,
+          "measured_peak_hz": 261.45,
+          "measured_note": "C4",
+          "cents_from_nearest_note": -1.1,
+          "cents_vs_expected": -1.2,
+          "ratio": 0.9993,
+          "snr_db": 49.9,
+          "rms_db": -9.7,
+          "target_note": "C4"
         },
-        "1.0": {
-          "hz": 376.28,
-          "mag": 72.3964
+        {
+          "expected_hz": 329.63,
+          "measured_peak_hz": 659.35,
+          "measured_note": "E5",
+          "cents_from_nearest_note": 0.2,
+          "cents_vs_expected": 1200.2,
+          "ratio": 2.0003,
+          "snr_db": 46.2,
+          "rms_db": -11.6,
+          "target_note": "E4"
         },
-        "2.0": {
-          "hz": 766.11,
-          "mag": 80.8422
+        {
+          "expected_hz": 392.0,
+          "measured_peak_hz": 392.0,
+          "measured_note": "G4",
+          "cents_from_nearest_note": 0.0,
+          "cents_vs_expected": 0.0,
+          "ratio": 1.0,
+          "snr_db": 45.3,
+          "rms_db": -15.1,
+          "target_note": "G4"
         },
-        "4.0": {
-          "hz": 1571.59,
-          "mag": 24.7274
+        {
+          "expected_hz": 440.0,
+          "measured_peak_hz": 439.89,
+          "measured_note": "A4",
+          "cents_from_nearest_note": -0.4,
+          "cents_vs_expected": -0.4,
+          "ratio": 0.9997,
+          "snr_db": 41.8,
+          "rms_db": -15.3,
+          "target_note": "A4"
+        },
+        {
+          "expected_hz": 523.25,
+          "measured_peak_hz": 523.26,
+          "measured_note": "C5",
+          "cents_from_nearest_note": 0.0,
+          "cents_vs_expected": 0.0,
+          "ratio": 1.0,
+          "snr_db": 49.3,
+          "rms_db": -16.1,
+          "target_note": "C5"
+        },
+        {
+          "expected_hz": 659.25,
+          "measured_peak_hz": 659.29,
+          "measured_note": "E5",
+          "cents_from_nearest_note": 0.1,
+          "cents_vs_expected": 0.1,
+          "ratio": 1.0001,
+          "snr_db": 38.9,
+          "rms_db": -20.7,
+          "target_note": "E5"
+        },
+        {
+          "expected_hz": 783.99,
+          "measured_peak_hz": 783.84,
+          "measured_note": "G5",
+          "cents_from_nearest_note": -0.3,
+          "cents_vs_expected": -0.3,
+          "ratio": 0.9998,
+          "snr_db": 33.1,
+          "rms_db": -20.0,
+          "target_note": "G5"
+        },
+        {
+          "expected_hz": 880.0,
+          "measured_peak_hz": 879.91,
+          "measured_note": "A5",
+          "cents_from_nearest_note": -0.2,
+          "cents_vs_expected": -0.2,
+          "ratio": 0.9999,
+          "snr_db": 28.4,
+          "rms_db": -21.8,
+          "target_note": "A5"
         }
-      },
-      "target_note": "G4"
-    },
-    {
-      "expected_hz": 440.0,
-      "measured_peak_hz": 660.97,
-      "measured_note": "E5",
-      "cents_from_nearest_note": 4.5,
-      "cents_vs_expected": 704.5,
-      "ratio": 1.5022,
-      "snr_db": 42.2,
-      "rms_db": -17.7,
-      "harmonic_candidates": {
-        "0.5": {
-          "hz": 225.22,
-          "mag": 88.017
-        },
-        "1.0": {
-          "hz": 465.64,
-          "mag": 84.0983
-        },
-        "2.0": {
-          "hz": 917.72,
-          "mag": 42.0165
-        },
-        "4.0": {
-          "hz": 1761.66,
-          "mag": 31.2748
-        }
-      },
-      "target_note": "A4"
-    },
-    {
-      "expected_hz": 523.25,
-      "measured_peak_hz": 785.28,
-      "measured_note": "G5",
-      "cents_from_nearest_note": 2.8,
-      "cents_vs_expected": 702.9,
-      "ratio": 1.5008,
-      "snr_db": 43.8,
-      "rms_db": -18.5,
-      "harmonic_candidates": {
-        "0.25": {
-          "hz": 127.08,
-          "mag": 6.1738
-        },
-        "0.5": {
-          "hz": 267.15,
-          "mag": 54.0379
-        },
-        "1.0": {
-          "hz": 498.05,
-          "mag": 57.11
-        },
-        "2.0": {
-          "hz": 1036.74,
-          "mag": 30.396
-        },
-        "4.0": {
-          "hz": 2159.73,
-          "mag": 92.8942
-        }
-      },
-      "target_note": "C5"
-    },
-    {
-      "expected_hz": 659.25,
-      "measured_peak_hz": 989.23,
-      "measured_note": "B5",
-      "cents_from_nearest_note": 2.6,
-      "cents_vs_expected": 702.6,
-      "ratio": 1.5005,
-      "snr_db": 39.5,
-      "rms_db": -17.9,
-      "harmonic_candidates": {
-        "0.25": {
-          "hz": 162.23,
-          "mag": 6.8829
-        },
-        "0.5": {
-          "hz": 344.24,
-          "mag": 56.6495
-        },
-        "1.0": {
-          "hz": 694.34,
-          "mag": 89.2606
-        },
-        "2.0": {
-          "hz": 1239.62,
-          "mag": 38.1209
-        },
-        "4.0": {
-          "hz": 2719.85,
-          "mag": 23.7392
-        }
-      },
-      "target_note": "E5"
-    },
-    {
-      "expected_hz": 783.99,
-      "measured_peak_hz": 1176.8,
-      "measured_note": "D6",
-      "cents_from_nearest_note": 3.1,
-      "cents_vs_expected": 703.2,
-      "ratio": 1.501,
-      "snr_db": 32.5,
-      "rms_db": -18.7,
-      "harmonic_candidates": {
-        "0.25": {
-          "hz": 194.09,
-          "mag": 16.0152
-        },
-        "0.5": {
-          "hz": 414.18,
-          "mag": 57.9673
-        },
-        "1.0": {
-          "hz": 752.56,
-          "mag": 79.9039
-        },
-        "2.0": {
-          "hz": 1518.31,
-          "mag": 24.5217
-        },
-        "4.0": {
-          "hz": 3234.01,
-          "mag": 18.2935
-        }
-      },
-      "target_note": "G5"
-    },
-    {
-      "expected_hz": 880.0,
-      "measured_peak_hz": 1321.45,
-      "measured_note": "E6",
-      "cents_from_nearest_note": 3.9,
-      "cents_vs_expected": 703.9,
-      "ratio": 1.5017,
-      "snr_db": 33.8,
-      "rms_db": -18.3,
-      "harmonic_candidates": {
-        "0.25": {
-          "hz": 232.91,
-          "mag": 55.0519
-        },
-        "0.5": {
-          "hz": 458.86,
-          "mag": 55.6955
-        },
-        "1.0": {
-          "hz": 833.13,
-          "mag": 67.8942
-        },
-        "2.0": {
-          "hz": 1769.17,
-          "mag": 19.9122
-        },
-        "4.0": {
-          "hz": 3628.05,
-          "mag": 29.9453
-        }
-      },
-      "target_note": "A5"
+      ]
     }
-  ]
+  }
 }
