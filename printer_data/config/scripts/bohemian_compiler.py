@@ -58,7 +58,7 @@ def extract_section_voices(
             by_s.setdefault(qs, []).append((qs, qe, p))
         for qs, grp in sorted(by_s.items()):
             grp.sort(key=lambda x: x[2])
-            s0, e0, p_ chosen = grp[-1]
+            s0, e0, p_chosen = grp[-1]
             s_out = s0 - tk_start + tk_out_offset
             e_out = e0 - tk_start + tk_out_offset
             # Check if target already has an active note overlapping [s_out, e_out)
