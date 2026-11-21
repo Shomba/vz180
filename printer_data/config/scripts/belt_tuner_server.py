@@ -21,7 +21,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import numpy as np
-from scipy.signal import butter, filtfilt
+from scipy.signal import butter, sosfiltfilt
 
 HOST = "0.0.0.0"
 PORT = 7135
@@ -83,9 +83,9 @@ class BeltTunerEngine:
         self.last_client_poll = 0.0
         self.proc: subprocess.Popen | None = None
 
-        # Precompute bandpass filter (30..340 Hz) and frequency axis
+        # Precompute bandpass filter (30..340 Hz) in SOS form (numerically stable at 48 kHz) and frequency axis
         nyq = SAMPLE_RATE / 2.0
-        self.bp_b, self.bp_a = butter(4, [28.0 / nyq, 340.0 / nyq], btype="band")
+        self.bp_sos = butter(4, [28.0 / nyq, 340.0 / nyq], btype="band", output="sos")
         self.win = np.hanning(FFT_WINDOW)
         full_freqs = np.fft.rfftfreq(N_FFT, d=1.0 / SAMPLE_RATE)
         self.spec_mask = (full_freqs >= F_MIN_SPEC) & (full_freqs <= F_MAX_SPEC)
@@ -215,7 +215,7 @@ class BeltTunerEngine:
 
     def _compute_frame_spectrum(self, frame: np.ndarray) -> tuple[np.ndarray, float]:
         frame = frame - np.mean(frame)
-        filtered = filtfilt(self.bp_b, self.bp_a, frame)
+        filtered = sosfiltfilt(self.bp_sos, frame)
         rms_db = 20.0 * math.log10(float(np.sqrt(np.mean(filtered ** 2))) + 1e-9)
         spec = np.abs(np.fft.rfft(filtered * self.win, n=N_FFT))[self.spec_mask]
         return spec, rms_db
