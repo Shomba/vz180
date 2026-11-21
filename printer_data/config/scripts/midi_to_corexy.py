@@ -65,7 +65,7 @@ def parse_midi(path: Path) -> tuple[int, list[tuple[int, int]], list[list[tuple[
         raise ValueError(f"Arquivo nao e MIDI valido: {path}")
     hdr_len, _fmt, ntrks, division = struct.unpack(">IHHH", data[4:14])
     pos = 8 + hdr_len
-    tempos = [(0, 500000)]
+    tempos: list[tuple[int, int]] = []
     tracks: list[list[tuple[int, int, int, int]]] = []
 
     for _ in range(ntrks):
@@ -125,6 +125,8 @@ def parse_midi(path: Path) -> tuple[int, list[tuple[int, int]], list[list[tuple[
         tracks.append(notes)
         pos = end
 
+    if not tempos:
+        tempos = [(0, 500000)]
     tempos.sort()
     return division, tempos, tracks
 
