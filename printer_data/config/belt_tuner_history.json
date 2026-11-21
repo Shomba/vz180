@@ -1,0 +1,32 @@
+{
+  "belt_a": {
+    "belt": "A",
+    "hz": 70.4,
+    "note": "C#2 (+27c)",
+    "tension_n": 2.45,
+    "snr_db": 21.2,
+    "timestamp": "20:34:30"
+  },
+  "belt_b": null,
+  "history": [
+    {
+      "belt": "A",
+      "hz": 70.4,
+      "note": "C#2 (+27c)",
+      "tension_n": 2.45,
+      "snr_db": 21.2,
+      "timestamp": "20:34:30"
+    },
+    {
+      "belt": "A",
+      "hz": 74.8,
+      "note": "D2 (+32c)",
+      "tension_n": 2.77,
+      "snr_db": 22.5,
+      "timestamp": "20:34:28"
+    }
+  ],
+  "span_mm": 150.0,
+  "belt_width": "6mm",
+  "target_hz": 120.0
+}
