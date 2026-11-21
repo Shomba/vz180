@@ -182,57 +182,62 @@ def arrange_megalovania(
         by_start.setdefault(s, []).append((s, e, p))
 
     # Build Lead (monophonic melody) + Secondary Harmony (for rests in Bass)
-    lead_raw_mono: list[tuple[int, int, int]] = []
+    # Keep full chord candidates at each onset so we can pick the highest in-range tone after phrase shift
+    lead_chords: list[tuple[int, list[tuple[int, int, int]]]] = []
     extra_harmony: list[tuple[int, int, int]] = []
 
     for s, group in sorted(by_start.items()):
-        bar = s // bar_ticks
         group.sort(key=lambda x: x[2])  # ascending pitch
-        if len(group) == 1:
-            s0, e0, p0 = group[0]
-            lead_raw_mono.append((s0, e0, p0))
-        else:
-            lo_n, hi_n = group[0], group[-1]
-            iv = hi_n[2] - lo_n[2]
-            if iv == 12:
-                # Octave double (e.g. bars 8-16): pick the note already inside A#3..D5
-                if LEAD_MIN_MIDI <= lo_n[2] <= LEAD_MAX_MIDI:
-                    lead_raw_mono.append(lo_n)
-                else:
-                    lead_raw_mono.append(hi_n)
-            else:
-                # True harmony interval (thirds/fourths/fifths in bars 20-40, 48-72):
-                # Upper note is the melody; lower note is harmony!
-                lead_raw_mono.append(hi_n)
-                extra_harmony.append(lo_n)
+        lead_chords.append((s, group))
 
-    # Phrase-level octave shift per 4-bar phrase so melodies never jump awkwardly mid-phrase
+    # Phrase-level octave shift per 2-bar sub-phrase so soaring melodies stay intact
+    # without wrapping individual high peaks awkwardly mid-phrase
     lead_out: list[tuple[int, int, int]] = []
-    max_bar = max((n[0] // bar_ticks for n in lead_raw_mono), default=0) + 1
+    sub_bars = 2
+    max_bar = max((s // bar_ticks for s, _ in lead_chords), default=0) + 1
     phrase_shifts: dict[int, int] = {}
-    for ph in range(0, max_bar, 4):
-        pnotes = [n[2] for n in lead_raw_mono if ph <= (n[0] // bar_ticks) < ph + 4]
+    for ph in range(0, max_bar, sub_bars):
+        # Representative melody note per onset: lower if pure octave double inside range, else upper
+        pnotes = []
+        for s, grp in lead_chords:
+            if not (ph <= (s // bar_ticks) < ph + sub_bars):
+                continue
+            if len(grp) > 1 and (grp[-1][2] - grp[0][2]) == 12 and LEAD_MIN_MIDI <= grp[0][2] <= LEAD_MAX_MIDI:
+                pnotes.append(grp[0][2])
+            else:
+                pnotes.append(grp[-1][2])
         if not pnotes:
             phrase_shifts[ph] = 0
             continue
-        # Test candidate uniform shifts (-24, -12, 0, +12, +24) and maximize notes in [LEAD_MIN, LEAD_MAX]
         best_shift = 0
         best_score = -1e9
         for sh in (-24, -12, 0, 12, 24):
             shifted = [p + sh for p in pnotes]
             in_range = sum(1 for p in shifted if LEAD_MIN_MIDI <= p <= LEAD_MAX_MIDI)
-            # Small bonus for centering around D4..D5 (62..74) and minimal shift magnitude
             center_pen = sum(abs(p - 68) for p in shifted) / len(shifted) * 0.05
-            sc = in_range - center_pen - abs(sh) * 0.001
+            sc = in_range - center_pen - abs(sh) * 0.002
             if sc > best_score:
                 best_score = sc
                 best_shift = sh
         phrase_shifts[ph] = best_shift
 
-    for s, e, p in lead_raw_mono:
-        ph = ((s // bar_ticks) // 4) * 4
-        p_adj = clamp_octave(p + phrase_shifts.get(ph, 0), LEAD_MIN_MIDI, LEAD_MAX_MIDI)
-        lead_out.append((s, e, p_adj))
+    for s, grp in lead_chords:
+        ph = ((s // bar_ticks) // sub_bars) * sub_bars
+        sh = phrase_shifts.get(ph, 0)
+        if len(grp) == 1:
+            s0, e0, p0 = grp[0]
+            lead_out.append((s0, e0, clamp_octave(p0 + sh, LEAD_MIN_MIDI, LEAD_MAX_MIDI)))
+        else:
+            lo_n, hi_n = grp[0], grp[-1]
+            if (hi_n[2] - lo_n[2]) == 12 and LEAD_MIN_MIDI <= (lo_n[2] + sh) <= LEAD_MAX_MIDI:
+                lead_out.append((lo_n[0], lo_n[1], lo_n[2] + sh))
+            else:
+                # Pick highest chord tone that fits inside [LEAD_MIN, LEAD_MAX] without octave wrap
+                in_rng = [n for n in grp if LEAD_MIN_MIDI <= (n[2] + sh) <= LEAD_MAX_MIDI]
+                chosen = in_rng[-1] if in_rng else hi_n
+                lead_out.append((chosen[0], chosen[1], clamp_octave(chosen[2] + sh, LEAD_MIN_MIDI, LEAD_MAX_MIDI)))
+                other = lo_n if chosen is hi_n else hi_n
+                extra_harmony.append((other[0], other[1], other[2] + sh))
 
     # Arrange Bass (Track 1) cleanly per 4-bar phrase
     bass_by_start: dict[int, list[tuple[int, int, int]]] = {}
