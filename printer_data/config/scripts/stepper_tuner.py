@@ -416,8 +416,8 @@ def main() -> int:
 
     use_audio_mode = not args.no_audio_mode
     scale_xy = (orig_ms_xy / 2.0) if use_audio_mode else 1.0
-    scale_z = (orig_ms_z / 4.0) if use_audio_mode else 1.0
-    print(f"[Klipper] XY microsteps={orig_ms_xy}->2 (scale={scale_xy}) | Z microsteps={orig_ms_z}->4 (scale={scale_z}) | _AUDIO_MODE={use_audio_mode}")
+    scale_z = (orig_ms_z / 1.0) if use_audio_mode else 1.0
+    print(f"[Klipper] XY microsteps={orig_ms_xy}->2 (scale={scale_xy}) | Z microsteps={orig_ms_z}->1/fullstep (scale={scale_z}) | _AUDIO_MODE={use_audio_mode}")
 
     print("[Ruido Ambiente] Gravando referencia de silencio (0.8s)...")
     noise_samples = record_audio(source, 0.8)
