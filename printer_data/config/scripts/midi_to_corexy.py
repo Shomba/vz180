@@ -549,7 +549,7 @@ def write_standalone_gcode(out_gcode: Path, header_comment: str, body_lines: lis
         "G90",
         "G28 X Y",
         f"G1 X{CENTER_X:.3f} Y{CENTER_Y:.3f} F9000",
-        "_AUDIO_MODE_4MS_ON",
+        "_AUDIO_MODE_COMPACTO_ON",
         "G91",
         *body_lines,
         "G90",
