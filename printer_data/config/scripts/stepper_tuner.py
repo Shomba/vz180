@@ -40,6 +40,38 @@ TEST_NOTES = [
     ("A5", 880.00),
 ]
 
+OCTAVE_NOTES_XY = [
+    ("C2", 65.41),
+    ("G2", 98.00),
+    ("C3", 130.81),
+    ("G3", 196.00),
+    ("C4", 261.63),
+    ("G4", 392.00),
+    ("C5", 523.25),
+    ("G5", 783.99),
+    ("C6", 1046.50),
+    ("G6", 1567.98),
+    ("C7", 2093.00),
+    ("G7", 3135.96),
+    ("C8", 4186.01),
+    ("E8", 5274.04),
+]
+
+OCTAVE_NOTES_Z = [
+    ("C2", 65.41),
+    ("G2", 98.00),
+    ("C3", 130.81),
+    ("G3", 196.00),
+    ("C4", 261.63),
+    ("G4", 392.00),
+    ("C5", 523.25),
+    ("G5", 783.99),
+    ("C6", 1046.50),
+    ("G6", 1567.98),
+    ("C7", 2093.00),
+    ("F7", 2793.83),
+]
+
 
 def hz_to_note_name(hz: float) -> tuple[str, float]:
     """Convert frequency in Hz to nearest musical note name and deviation in cents."""
@@ -120,7 +152,7 @@ def record_audio(source: str, duration_s: float) -> np.ndarray:
     return samples / 32768.0
 
 
-def compute_spectrum(samples: np.ndarray, f_min: float = 120.0, f_max: float = 4000.0) -> tuple[np.ndarray, np.ndarray]:
+def compute_spectrum(samples: np.ndarray, f_min: float = 55.0, f_max: float = 8000.0) -> tuple[np.ndarray, np.ndarray]:
     """Bandpass filter and compute high-resolution zero-padded magnitude spectrum."""
     if len(samples) < 256:
         return np.array([0.0]), np.array([0.0])
@@ -264,24 +296,38 @@ def tune_single_motor(
     steps_per_mm_xy: float,
     steps_per_mm_z: float,
     scale_xy: float,
+    mode: str = "standard",
+    max_xy_vel: float = 800.0,
+    max_z_vel: float = 80.0,
 ) -> dict:
     label_map = {
         "A": "Motor A (stepper_x + stepper_x1, diagonal +45 deg, B parado)",
         "B": "Motor B (stepper_y + stepper_y1, diagonal -45 deg, A parado)",
         "Z": "Motor Z (stepper_z, vertical isolado)",
     }
+    if mode == "octaves":
+        note_list = OCTAVE_NOTES_XY if motor in ("A", "B") else OCTAVE_NOTES_Z
+    else:
+        note_list = TEST_NOTES
+
     print(f"\n=== Afinando {label_map[motor]} ===")
-    print("Nota | Alvo (Hz) | Medido (Hz) | Nota Real | Ratio  | Desvio (cents) | SNR (dB) | RMS (dB)")
-    print("-" * 92)
+    print("Nota | Vel(mm/s) | Alvo (Hz) | Medido (Hz) | Nota Real | Ratio  | Desvio (cents) | SNR (dB) | RMS (dB)")
+    print("-" * 105)
 
     results = []
     direction = 1
-    for note_label, target_hz in TEST_NOTES:
+    for note_label, target_hz in note_list:
         if motor in ("A", "B"):
+            v_phys = (target_hz / steps_per_mm_xy) / math.sqrt(2.0)
+            if v_phys > max_xy_vel:
+                continue
             gcode, rec_dur = build_corexy_isolated_move(
                 motor, target_hz, dur, steps_per_mm_xy, scale_xy, direction
             )
         else:
+            v_phys = target_hz / steps_per_mm_z
+            if v_phys > max_z_vel:
+                continue
             gcode, rec_dur = build_z_isolated_move(target_hz, dur, steps_per_mm_z, direction)
 
         rec_holder: list[np.ndarray] = []
@@ -298,15 +344,16 @@ def tune_single_motor(
 
         analysis = analyze_tone(samples, noise_freqs, noise_spec, target_hz)
         analysis["target_note"] = note_label
+        analysis["velocity_mm_s"] = round(v_phys, 1)
         results.append(analysis)
 
         print(
-            f"{note_label:<4} | {target_hz:9.2f} | {analysis['measured_peak_hz']:11.2f} | "
+            f"{note_label:<4} | {v_phys:9.1f} | {target_hz:9.2f} | {analysis['measured_peak_hz']:11.2f} | "
             f"{analysis['measured_note']:<9} | {analysis['ratio']:6.3f} | "
             f"{analysis['cents_vs_expected']:+14.1f} | {analysis['snr_db']:8.1f} | {analysis['rms_db']:8.1f}"
         )
         direction = -direction
-        time.sleep(0.15)
+        time.sleep(0.12)
 
     valid = [r for r in results if r["snr_db"] >= 8.0]
     ratios = [r["ratio"] for r in valid] if valid else [r["ratio"] for r in results]
