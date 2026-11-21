@@ -333,7 +333,7 @@ def tune_single_motor(
             v_phys = target_hz / steps_per_mm_z
             if v_phys > max_z_vel:
                 continue
-            gcode, rec_dur = build_z_isolated_move(target_hz, dur, steps_per_mm_z, direction)
+            gcode, rec_dur = build_z_isolated_move(target_hz, dur, steps_per_mm_z, scale_z, direction)
 
         rec_holder: list[np.ndarray] = []
 
@@ -406,16 +406,18 @@ def main() -> int:
 
     cfg = get_stepper_settings()
     orig_ms_xy = int(cfg["stepper_x"]["microsteps"])
+    orig_ms_z = int(cfg["stepper_z"]["microsteps"])
     rot_xy = float(cfg["stepper_x"]["rotation_distance"])
     steps_per_mm_xy = 200.0 / rot_xy
     rot_z = float(cfg["stepper_z"]["rotation_distance"])
     steps_per_mm_z = 200.0 / rot_z
-    klipper_max_z_vel = float(cfg["printer"].get("max_z_velocity", 80.0))
+    klipper_max_z_vel = float(cfg["printer"].get("max_z_velocity", 100.0))
     eff_max_z_vel = min(args.max_z_vel, klipper_max_z_vel)
 
     use_audio_mode = not args.no_audio_mode
-    scale_xy = (orig_ms_xy / 4.0) if use_audio_mode else 1.0
-    print(f"[Klipper] XY microsteps={orig_ms_xy} ({steps_per_mm_xy:.2f} passos/mm) | _AUDIO_MODE_ON={use_audio_mode} | scale={scale_xy}")
+    scale_xy = (orig_ms_xy / 2.0) if use_audio_mode else 1.0
+    scale_z = (orig_ms_z / 4.0) if use_audio_mode else 1.0
+    print(f"[Klipper] XY microsteps={orig_ms_xy}->2 (scale={scale_xy}) | Z microsteps={orig_ms_z}->4 (scale={scale_z}) | _AUDIO_MODE={use_audio_mode}")
 
     print("[Ruido Ambiente] Gravando referencia de silencio (0.8s)...")
     noise_samples = record_audio(source, 0.8)
@@ -437,24 +439,36 @@ def main() -> int:
         run_gcode("G90\nG1 Z35 F1800\nM400")
 
     motor_results = {}
-    audio_enabled = False
+    audio_xy_enabled = False
+    audio_z_enabled = False
     try:
-        if use_audio_mode and ("A" in motors or "B" in motors):
-            run_gcode("_AUDIO_MODE_ON")
-            audio_enabled = True
-
         for m in motors:
-            if m == "Z" and audio_enabled:
-                run_gcode("G90\n_AUDIO_MODE_OFF")
-                audio_enabled = False
+            if m in ("A", "B"):
+                if audio_z_enabled:
+                    run_gcode("G90\n_AUDIO_MODE_Z_OFF")
+                    audio_z_enabled = False
+                if use_audio_mode and not audio_xy_enabled:
+                    run_gcode("_AUDIO_MODE_ON")
+                    audio_xy_enabled = True
+            elif m == "Z":
+                if audio_xy_enabled:
+                    run_gcode("G90\n_AUDIO_MODE_OFF")
+                    audio_xy_enabled = False
+                if use_audio_mode and not audio_z_enabled:
+                    run_gcode("_AUDIO_MODE_Z_ON")
+                    audio_z_enabled = True
+
             motor_results[f"motor_{m}"] = tune_single_motor(
-                m, source, noise_freqs, noise_spec, args.duration, steps_per_mm_xy, steps_per_mm_z, scale_xy,
+                m, source, noise_freqs, noise_spec, args.duration,
+                steps_per_mm_xy, steps_per_mm_z, scale_xy, scale_z=scale_z,
                 mode=args.mode, max_xy_vel=args.max_xy_vel, max_z_vel=eff_max_z_vel,
             )
     finally:
-        if audio_enabled:
+        if audio_xy_enabled:
             run_gcode("G90\n_AUDIO_MODE_OFF")
-        else:
+        if audio_z_enabled:
+            run_gcode("G90\n_AUDIO_MODE_Z_OFF")
+        if not audio_xy_enabled and not audio_z_enabled:
             run_gcode("G90")
 
     summary = {
