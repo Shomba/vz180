@@ -468,6 +468,241 @@ def run_klipper_gcode(script: str) -> dict:
         return json.loads(r.read().decode())
 
 
+GCODES_DIR = Path("/home/shoomba/printer_data/gcodes")
+CONFIG_DIR = Path("/home/shoomba/printer_data/config")
+SOUNDFONT_MANIFEST = Path("/home/shoomba/mainsail/soundfont/manifest.json")
+
+
+def hz_to_midi_float(hz: float) -> float:
+    if hz < 35.0:
+        return 0.0
+    return round(69.0 + 12.0 * math.log2(hz / 440.0), 2)
+
+
+def list_musical_songs() -> list[dict]:
+    songs = []
+    for gf in sorted(GCODES_DIR.glob("*.gcode")):
+        if any(k in gf.name.upper() for k in ("MEGALOVANIA", "BAD_APPLE", "BOHEMIAN", "BUDDY", "WEEZER", "MUSIC", "AUDIO")):
+            songs.append({
+                "id": f"file:{gf.name}",
+                "title": f"{gf.name} (G-Code Completo)",
+                "type": "gcode_file",
+                "path": str(gf),
+            })
+    # Also scan musical macros in macros_music.cfg and buzer.cfg
+    for cfg_name in ("macros_music.cfg", "buzer.cfg"):
+        cfg_p = CONFIG_DIR / cfg_name
+        if not cfg_p.exists():
+            continue
+        text = cfg_p.read_text(errors="ignore")
+        for line in text.splitlines():
+            s = line.strip()
+            if s.lower().startswith("[gcode_macro ") and s.endswith("]"):
+                mname = s[13:-1].strip().upper()
+                if not mname.startswith("_"):
+                    songs.append({
+                        "id": f"macro:{cfg_name}:{mname}",
+                        "title": f"Macro {mname} ({cfg_name})",
+                        "type": "macro",
+                        "macro": mname,
+                        "cfg": cfg_name,
+                    })
+    return songs
+
+
+def extract_macro_gcode(cfg_name: str, macro_name: str) -> str:
+    cfg_p = CONFIG_DIR / cfg_name
+    if not cfg_p.exists():
+        return ""
+    lines = cfg_p.read_text(errors="ignore").splitlines()
+    in_macro = False
+    in_gcode = False
+    out = []
+    header = f"[gcode_macro {macro_name.lower()}]"
+    for line in lines:
+        s = line.strip()
+        if s.lower().startswith("[") and s.endswith("]"):
+            if in_macro:
+                break
+            if s.lower() == header:
+                in_macro = True
+            continue
+        if in_macro:
+            if s.lower().startswith("gcode:"):
+                in_gcode = True
+                continue
+            if in_gcode:
+                if line.startswith(" ") or line.startswith("\t") or s == "":
+                    out.append(s)
+                else:
+                    break
+    return "\n".join(out)
+
+
+def parse_musical_gcode_text(gcode_text: str, title: str = "G-Code") -> dict:
+    """
+    Parse VZ180 musical G-code (3-axis CoreXY + Z) into an exact acoustic timeline of
+    (t, dur, hz_x, midi_x, note_x, hz_y, midi_y, note_y, hz_z, midi_z, note_z, x_mm, y_mm, z_mm).
+    """
+    in_relative = False
+    in_audio_xy = False
+    in_audio_z = False
+    scale_xy = 4.0
+    scale_z = 16.0
+    x_phys = 90.0
+    y_phys = 87.0
+    z_phys = 25.0
+    feed_mm_min = 3000.0
+    cur_t = 0.0
+    events = []
+    skip_next_return = False
+
+    for raw_line in gcode_text.splitlines():
+        line_comment = ""
+        if ";" in raw_line:
+            code_part, line_comment = raw_line.split(";", 1)
+        else:
+            code_part = raw_line
+        s = code_part.strip().upper()
+        if "RETORNO" in line_comment.upper():
+            skip_next_return = True
+        if not s:
+            continue
+
+        if s == "G91":
+            in_relative = True
+            continue
+        if s == "G90":
+            in_relative = False
+            continue
+        if "_AUDIO_MODE_COMPACTO_ON" in s:
+            in_audio_xy = True
+            scale_xy = 4.0
+            continue
+        if "_AUDIO_MODE_ON" in s:
+            in_audio_xy = True
+            scale_xy = 16.0
+            continue
+        if "_AUDIO_MODE_Z_ON" in s:
+            in_audio_z = True
+            scale_z = 16.0
+            continue
+        if "_AUDIO_MODE_OFF" in s or "_AUDIO_MODE_Z_OFF" in s:
+            continue
+
+        if s.startswith("G4 "):
+            for tok in s.split()[1:]:
+                if tok.startswith("P"):
+                    try:
+                        ms = float(tok[1:])
+                        if ms > 0:
+                            cur_t += ms / 1000.0
+                    except Exception:
+                        pass
+            continue
+
+        if s.startswith("G1 ") or s.startswith("G0 "):
+            dx = 0.0
+            dy = 0.0
+            dz = 0.0
+            has_xyz = False
+            for tok in s.split()[1:]:
+                if len(tok) < 2:
+                    continue
+                k = tok[0]
+                try:
+                    val = float(tok[1:])
+                except Exception:
+                    continue
+                if k == "X":
+                    dx = val
+                    has_xyz = True
+                elif k == "Y":
+                    dy = val
+                    has_xyz = True
+                elif k == "Z":
+                    dz = val
+                    has_xyz = True
+                elif k == "F" and val > 0:
+                    feed_mm_min = val
+
+            if not has_xyz:
+                continue
+
+            if not in_relative:
+                if dx != 0:
+                    x_phys = dx
+                if dy != 0:
+                    y_phys = dy
+                if dz != 0:
+                    z_phys = dz
+                continue
+
+            if skip_next_return:
+                skip_next_return = False
+                x_phys += dx * scale_xy
+                y_phys += dy * scale_xy
+                z_phys += dz * scale_z
+                continue
+
+            dist_cmd = math.sqrt(dx * dx + dy * dy + dz * dz)
+            if dist_cmd < 1e-6 or feed_mm_min <= 0:
+                continue
+
+            dur_s = dist_cmd / (feed_mm_min / 60.0)
+            if dur_s <= 0.002 or dur_s > 4.0:
+                continue
+
+            dA_cmd = dx + dy
+            dB_cmd = dx - dy
+            hz_x = round((abs(dA_cmd) * 80.0) / dur_s, 1) if abs(dA_cmd) > 1e-5 else 0.0
+            hz_y = round((abs(dB_cmd) * 80.0) / dur_s, 1) if abs(dB_cmd) > 1e-5 else 0.0
+            hz_z = round((abs(dz) * 1200.00075) / dur_s, 1) if abs(dz) > 1e-6 else 0.0
+
+            # Filter out non-musical return moves (< 55 Hz or > 2200 Hz)
+            if hz_x < 55.0 or hz_x > 2200.0:
+                hz_x = 0.0
+            if hz_y < 55.0 or hz_y > 2200.0:
+                hz_y = 0.0
+            if hz_z < 55.0 or hz_z > 2200.0:
+                hz_z = 0.0
+
+            x_phys = round(x_phys + dx * scale_xy, 2)
+            y_phys = round(y_phys + dy * scale_xy, 2)
+            z_phys = round(z_phys + dz * scale_z, 2)
+
+            if hz_x > 0 or hz_y > 0 or hz_z > 0:
+                events.append({
+                    "t": round(cur_t, 4),
+                    "dur": round(dur_s, 4),
+                    "hz_x": hz_x,
+                    "midi_x": hz_to_midi_float(hz_x),
+                    "note_x": hz_to_note(hz_x).split(" ")[0] if hz_x > 0 else "--",
+                    "hz_y": hz_y,
+                    "midi_y": hz_to_midi_float(hz_y),
+                    "note_y": hz_to_note(hz_y).split(" ")[0] if hz_y > 0 else "--",
+                    "hz_z": hz_z,
+                    "midi_z": hz_to_midi_float(hz_z),
+                    "note_z": hz_to_note(hz_z).split(" ")[0] if hz_z > 0 else "--",
+                    "x_mm": x_phys,
+                    "y_mm": y_phys,
+                    "z_mm": z_phys,
+                })
+            cur_t += dur_s
+
+    n_x = sum(1 for e in events if e["hz_x"] > 0)
+    n_y = sum(1 for e in events if e["hz_y"] > 0)
+    n_z = sum(1 for e in events if e["hz_z"] > 0)
+    return {
+        "ok": True,
+        "title": title,
+        "duration_s": round(cur_t, 2),
+        "total_events": len(events),
+        "counts": {"x": n_x, "y": n_y, "z": n_z},
+        "events": events,
+    }
+
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args) -> None:
         return
