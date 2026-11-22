@@ -305,6 +305,24 @@ class BeltTunerEngine:
                 self.live_snr_db = round(max(0.0, snr_db), 1)
                 self.live_spectrum = norm_spec
 
+                # Also compute wide-band musical spectrum (90..1050 Hz) for the Virtual XYZ Instrument
+                raw_zero = frame - np.mean(frame)
+                raw_rms_db = 20.0 * math.log10(float(np.sqrt(np.mean(raw_zero ** 2))) + 1e-9)
+                m_spec = np.abs(np.fft.rfft(raw_zero * self.win, n=N_FFT))[self.music_mask]
+                if len(m_spec) > 0:
+                    m_peak_idx = int(np.argmax(m_spec))
+                    m_peak_mag = float(m_spec[m_peak_idx])
+                    m_floor = float(np.median(m_spec) + 1e-9)
+                    m_snr = 20.0 * math.log10((m_peak_mag + 1e-9) / m_floor)
+                    m_hz = float(self.music_freqs[m_peak_idx])
+                    self.music_live_db = round(raw_rms_db, 1)
+                    if m_snr >= 9.0 and raw_rms_db >= -35.0:
+                        self.music_live_hz = round(m_hz, 1)
+                        self.music_live_note = hz_to_note(m_hz)
+                    ds_m = m_spec[::8]
+                    m_max = float(np.max(ds_m)) if len(ds_m) else 1.0
+                    self.music_spectrum = [round(float(v) / max(m_max, 1e-6), 3) for v in ds_m]
+
                 now = time.time()
                 if snr_db >= 9.5 and (rms_db >= self.noise_rms_db + 3.0):
                     self.live_hz = round(peak_hz, 1)
