@@ -429,14 +429,15 @@ def compile_3axis_gcode_halfmoon(
     tempos_h: list[tuple[int, int]],
 ) -> tuple[list[str], dict]:
     """
-    Compila os 3 eixos (A, B, Z) guiando a direcao (+1/-1) de cada nota musical — SEM nenhuma
-    viagem extra fora da musica — para que:
-      1. Durante Intro + Verso (0..51.7s): a cabeca fique posicionada no canto das 1:30
+    Compila os 3 eixos (A, B, Z):
+      1. Intro + Verso + Ponte 3 Oitavas (0.0s .. 66.00s): a cabeca permanece no canto das 1:30
          (X=132.43, Y=129.43, raio 60mm a +45 deg do centro 90,87).
-      2. Durante a Ponte antes do Refrao (51.7s..66.46s): as proprias notas vocais desenhem
-         uma meia-lua de raio 60 mm no sentido horario das 1:30 (+45 deg) ate as 7:30 (-135 deg,
-         X=47.57, Y=44.57), chegando as 7:30 exatamente na entrada do Refrao Final!
-      3. Durante o Refrao Final (66.46s..103.5s): a cabeca dance ao redor do canto das 7:30.
+      2. Exatamente APOS a Ponte e ANTES do Refrao Final (na pausa musical de 462 ms entre
+         t=66.00s e t=66.46s): a cabeca executa uma MEIA-LUA PURA de raio 60 mm (48 segmentos
+         suaves sem musica simultanea, apenas o som puro do arco CoreXY!) das 1:30 (+45 deg)
+         ate as 7:30 (-135 deg, X=47.57, Y=44.57), aterrissando nas 7:30 exatamente na batida 1
+         do Refrao Final!
+      3. Refrao Final (66.46s .. 103.5s): a cabeca toca ao redor do canto das 7:30.
     """
     import midi_to_corexy as mc
 
@@ -448,19 +449,11 @@ def compile_3axis_gcode_halfmoon(
     SAFE_Z_CMD_ACCEL = 60.0
 
     CX, CY, R = 90.0, 87.0, 60.0
-    T_ARC_START = 51.0
-    T_ARC_END = 66.46
+    T_CHORUS_START = 576.0 * 60.0 / (130.0 * 4.0)  # 66.4615 s
+    T_BRIDGE_END = 572.0 * 60.0 / (130.0 * 4.0)    # 66.0000 s
 
-    def get_target_xy(t_sec: float) -> tuple[float, float, bool]:
-        if t_sec <= T_ARC_START:
-            ang = math.radians(45.0)   # 1:30
-            return (CX + R * math.cos(ang), CY + R * math.sin(ang), False)
-        if t_sec >= T_ARC_END:
-            ang = math.radians(-135.0)  # 7:30
-            return (CX + R * math.cos(ang), CY + R * math.sin(ang), False)
-        u = (t_sec - T_ARC_START) / (T_ARC_END - T_ARC_START)
-        ang = math.radians(45.0 - 180.0 * u)  # Clockwise 1:30 -> 3:00 -> 4:30 -> 6:00 -> 7:30
-        return (CX + R * math.cos(ang), CY + R * math.sin(ang), True)
+    pos_130 = (CX + R * math.cos(math.radians(45.0)), CY + R * math.sin(math.radians(45.0)))
+    pos_730 = (CX + R * math.cos(math.radians(-135.0)), CY + R * math.sin(math.radians(-135.0)))
 
     ticks = set()
     for v in (voice_A, voice_B, voice_Z):
@@ -488,7 +481,7 @@ def compile_3axis_gcode_halfmoon(
         pZ = voice_Z[iZ][2] if (iZ < len(voice_Z) and voice_Z[iZ][0] <= tm < voice_Z[iZ][1]) else None
         segments.append((t2s(tk0), t2s(tk1), pA, pB, pZ))
 
-    start_x, start_y, _ = get_target_xy(0.0)
+    start_x, start_y = pos_130
     x_phys, y_phys, z_phys = start_x, start_y, 25.0
     cum_dx = cum_dy = cum_dz = 0.0
     min_x = max_x = x_phys
@@ -497,9 +490,55 @@ def compile_3axis_gcode_halfmoon(
     cur_accel_bucket = -1
     lines: list[str] = []
     n_moves = n_rests = 0
+    halfmoon_done = False
 
     for t0, t1, pA, pB, pZ in segments:
         dt = t1 - t0
+
+        # Pure R=60mm Half-Moon (1:30 -> 7:30) right in the silence gap between Bridge end (66.00s) and Chorus (66.46s)!
+        if not halfmoon_done and t0 >= T_BRIDGE_END - 0.05 and pA is None and pB is None and pZ is None:
+            halfmoon_done = True
+            lines.append("; === MEIA-LUA PURA R=60mm (1:30 -> 7:30) — SOM PURO DO ARCO COREXY ===")
+            lines.append("SET_VELOCITY_LIMIT ACCEL=3000 SQUARE_CORNER_VELOCITY=5.0")
+            cur_accel_bucket = 3000
+            n_arc = 48
+            arc_dur = max(0.46, dt)  # Uses the exact 462 ms musical pause before Chorus!
+            # Smoothly interpolate from exact current (x_phys, y_phys) onto the R=60mm arc to 7:30
+            a0 = math.atan2(y_phys - CY, x_phys - CX)
+            r0 = math.hypot(x_phys - CX, y_phys - CY)
+            a1 = math.radians(-135.0)
+            # Ensure clockwise sweep from +45 deg (~0.785) down to -135 deg (~-2.356)
+            if a0 < -math.pi * 0.5:
+                a0 += 2.0 * math.pi
+            pts = []
+            for j in range(1, n_arc + 1):
+                u = j / float(n_arc)
+                ang = a0 + (a1 - a0) * u
+                rad = r0 * (1.0 - min(1.0, u * 4.0)) + R * min(1.0, u * 4.0)
+                pts.append((CX + rad * math.cos(ang), CY + rad * math.sin(ang)))
+            # Compute total commanded arc length to get exact constant feedrate
+            total_cmd_len = 0.0
+            px, py = x_phys, y_phys
+            for nx, ny in pts:
+                total_cmd_len += math.hypot((nx - px) / scale_xy, (ny - py) / scale_xy)
+                px, py = nx, ny
+            arc_feed = round((total_cmd_len / arc_dur) * 60.0, 1)
+            for nx, ny in pts:
+                dx_q = round((nx - x_phys) / scale_xy, 5)
+                dy_q = round((ny - y_phys) / scale_xy, 5)
+                if abs(dx_q) < 1e-6 and abs(dy_q) < 1e-6:
+                    continue
+                lines.append(f"G1 X{dx_q:.5f} Y{dy_q:.5f} F{arc_feed:.1f}")
+                n_moves += 1
+                cum_dx = round(cum_dx + dx_q, 5)
+                cum_dy = round(cum_dy + dy_q, 5)
+                x_phys = start_x + cum_dx * scale_xy
+                y_phys = start_y + cum_dy * scale_xy
+                min_x, max_x = min(min_x, x_phys), max(max_x, x_phys)
+                min_y, max_y = min(min_y, y_phys), max(max_y, y_phys)
+            lines.append("SET_VELOCITY_LIMIT SQUARE_CORNER_VELOCITY=1.25")
+            continue
+
         if pA is None and pB is None and pZ is None:
             ms = int(round(dt * 1000.0))
             if ms >= 5:
@@ -507,83 +546,73 @@ def compile_3axis_gcode_halfmoon(
                 n_rests += 1
             continue
 
+        tx, ty = pos_130 if t0 < T_CHORUS_START else pos_730
         fA = mc.midi_to_hz(pA) if pA is not None else 0.0
         fB = mc.midi_to_hz(pB) if pB is not None else 0.0
         fZ = mc.midi_to_hz(pZ) if pZ is not None else 0.0
 
-        in_arc = (t1 >= T_ARC_START and t0 <= T_ARC_END)
-        n_sub = max(1, int(math.ceil(dt / 0.11))) if in_arc else 1
-        sub_dt = dt / n_sub
+        magA = (fA / pulses_xy) * dt
+        magB = (fB / pulses_xy) * dt
+        magZ = (fZ / pulses_z) * dt
 
-        for k in range(n_sub):
-            tk_end = t0 + (k + 1) * sub_dt
-            tx, ty, is_arc_now = get_target_xy(tk_end)
-            magA = (fA / pulses_xy) * sub_dt
-            magB = (fB / pulses_xy) * sub_dt
-            magZ = (fZ / pulses_z) * sub_dt
-
-            best_c = 1e18
-            best_dx = best_dy = 0.0
-            for sA in ([-1, 1] if magA > 0 else [0]):
-                for sB in ([-1, 1] if magB > 0 else [0]):
-                    dx_c = 0.5 * (sA * magA + sB * magB)
-                    dy_c = 0.5 * (sA * magA - sB * magB)
-                    nx = x_phys + dx_c * scale_xy
-                    ny = y_phys + dy_c * scale_xy
-                    if nx < 15.0 or nx > 165.0 or ny < 15.0 or ny > 160.0:
-                        c = 1e9 + abs(nx - CX) + abs(ny - CY)
-                    else:
-                        c = (nx - tx) ** 2 + (ny - ty) ** 2
-                        if is_arc_now:
-                            # Keep tightly glued to the R=60mm semicircle!
-                            r_err = math.hypot(nx - CX, ny - CY) - R
-                            c += 2.5 * (r_err ** 2)
-                    if c < best_c:
-                        best_c = c
-                        best_dx, best_dy = dx_c, dy_c
-
-            best_dz = 0.0
-            if magZ > 0:
-                dz_p = magZ * scale_z
-                if z_phys + dz_p > 34.0:
-                    best_dz = -magZ
-                elif z_phys - dz_p < 16.0:
-                    best_dz = magZ
+        best_c = 1e18
+        best_dx = best_dy = 0.0
+        for sA in ([-1, 1] if magA > 0 else [0]):
+            for sB in ([-1, 1] if magB > 0 else [0]):
+                dx_c = 0.5 * (sA * magA + sB * magB)
+                dy_c = 0.5 * (sA * magA - sB * magB)
+                nx = x_phys + dx_c * scale_xy
+                ny = y_phys + dy_c * scale_xy
+                if nx < 15.0 or nx > 165.0 or ny < 15.0 or ny > 160.0:
+                    c = 1e9 + abs(nx - CX) + abs(ny - CY)
                 else:
-                    best_dz = magZ if z_phys <= 25.0 else -magZ
+                    c = (nx - tx) ** 2 + (ny - ty) ** 2
+                if c < best_c:
+                    best_c = c
+                    best_dx, best_dy = dx_c, dy_c
 
-            dx_q = round(best_dx, 5)
-            dy_q = round(best_dy, 5)
-            dz_q = round(best_dz, 5)
-            L_cmd = math.sqrt(dx_q * dx_q + dy_q * dy_q + dz_q * dz_q)
-            if L_cmd < 1e-6:
-                continue
-
-            if abs(dz_q) > 1e-6:
-                raw_safe_accel = min(3000.0, SAFE_Z_CMD_ACCEL * (L_cmd / abs(dz_q)))
+        best_dz = 0.0
+        if magZ > 0:
+            dz_p = magZ * scale_z
+            if z_phys + dz_p > 34.0:
+                best_dz = -magZ
+            elif z_phys - dz_p < 16.0:
+                best_dz = magZ
             else:
-                raw_safe_accel = 3000.0
-            bucket = 60
-            for b in (60, 250, 900, 3000):
-                if raw_safe_accel >= b:
-                    bucket = b
-            if bucket != cur_accel_bucket:
-                lines.append(f"SET_VELOCITY_LIMIT ACCEL={bucket}")
-                cur_accel_bucket = bucket
+                best_dz = magZ if z_phys <= 25.0 else -magZ
 
-            f_cmd = round((L_cmd / sub_dt) * 60.0, 2)
-            lines.append(f"G1 X{dx_q:.5f} Y{dy_q:.5f} Z{dz_q:.5f} F{f_cmd:.2f}")
-            n_moves += 1
+        dx_q = round(best_dx, 5)
+        dy_q = round(best_dy, 5)
+        dz_q = round(best_dz, 5)
+        L_cmd = math.sqrt(dx_q * dx_q + dy_q * dy_q + dz_q * dz_q)
+        if L_cmd < 1e-6:
+            continue
 
-            cum_dx = round(cum_dx + dx_q, 5)
-            cum_dy = round(cum_dy + dy_q, 5)
-            cum_dz = round(cum_dz + dz_q, 5)
-            x_phys = start_x + cum_dx * scale_xy
-            y_phys = start_y + cum_dy * scale_xy
-            z_phys = 25.0 + cum_dz * scale_z
-            min_x, max_x = min(min_x, x_phys), max(max_x, x_phys)
-            min_y, max_y = min(min_y, y_phys), max(max_y, y_phys)
-            min_z, max_z = min(min_z, z_phys), max(max_z, z_phys)
+        if abs(dz_q) > 1e-6:
+            raw_safe_accel = min(3000.0, SAFE_Z_CMD_ACCEL * (L_cmd / abs(dz_q)))
+        else:
+            raw_safe_accel = 3000.0
+        bucket = 60
+        for b in (60, 250, 900, 3000):
+            if raw_safe_accel >= b:
+                bucket = b
+        if bucket != cur_accel_bucket:
+            lines.append(f"SET_VELOCITY_LIMIT ACCEL={bucket}")
+            cur_accel_bucket = bucket
+
+        f_cmd = round((L_cmd / dt) * 60.0, 2)
+        lines.append(f"G1 X{dx_q:.5f} Y{dy_q:.5f} Z{dz_q:.5f} F{f_cmd:.2f}")
+        n_moves += 1
+
+        cum_dx = round(cum_dx + dx_q, 5)
+        cum_dy = round(cum_dy + dy_q, 5)
+        cum_dz = round(cum_dz + dz_q, 5)
+        x_phys = start_x + cum_dx * scale_xy
+        y_phys = start_y + cum_dy * scale_xy
+        z_phys = 25.0 + cum_dz * scale_z
+        min_x, max_x = min(min_x, x_phys), max(max_x, x_phys)
+        min_y, max_y = min(min_y, y_phys), max(max_y, y_phys)
+        min_z, max_z = min(min_z, z_phys), max(max_z, z_phys)
 
     # Return cleanly to exact start position inside audio mode so Klipper coords stay 100% synced
     lines.append("; Retorno exato a origem (1:30) para preservar coordenadas")
@@ -604,6 +633,7 @@ def compile_3axis_gcode_halfmoon(
         "x_phys_range": (round(min_x, 1), round(max_x, 1)),
         "y_phys_range": (round(min_y, 1), round(max_y, 1)),
         "z_phys_range": (round(min_z, 2), round(max_z, 2)),
+        "halfmoon_executed": halfmoon_done,
     }
     return lines, stats
 
