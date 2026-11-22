@@ -1,26 +1,22 @@
 #!/home/shoomba/klippy-env/bin/python
 """
 Compilador Acustico 3 Eixos & Simulador Offline por SoundFont para:
-  Siinamota (powapowa-P) — "Young Girl A" (Shoujo A / 少女A) (260 BPM, F minor / Ab major)
+  Siinamota — "Young Girl A" (Shoujo A / 少女A)
+  Fonte: https://onlinesequencer.net/3710759 (3.412 notas, 9 instrumentos, 130 BPM, 103.4s)
 
 Distribuicao de Canais Solicitada:
   - Canal A (Eixo X / Motor A +45 deg, _AUDIO_MODE_COMPACTO_ON):
-      Vocal Principal de Kagamine Rin extraido de shoujo_a_3924.ustx (719 notas, D#4..F5)
-      com articulacao silabica preservada ("Boku no inochi...", "Aa toki ni...", "samui samui...").
+      Intro Lead (I41, t=64..192) + Trilha Vocal Principal (I23, t=192..896).
+      Na Ponte antes do Refrao Final (t=448..576): Vocal na Oitava MEDIA (D#4..D#5).
   - Canal B (Eixo Y / Motor B -45 deg, _AUDIO_MODE_COMPACTO_ON):
-      Instrumentos Principais: Riff iconico de Piano/Synth na Intro, Acordes & Arpejos sincopados
-      (Dbmaj7 -> C7 -> Fm7 -> Eb/Ab7) no Verso, Stabs com pausas dramaticas no Pre-Refrao
-      ("chotto! chotto!") e Harmonia + Synth Lead (VoicePart 1) no Refrao.
+      Guitarra Eletrica (I44, t=0..448 e t=576..832) + Outro (I52, t=832..896).
+      Na Ponte antes do Refrao Final (t=448..576): Vocal na Oitava GRAVE (D#3..D#4, -1 oitava).
   - Canal Z (Eixo Z / Vertical TMC2208, _AUDIO_MODE_Z_ON):
-      Percussao / Batida de Fundo Breakbeat (Bumbo com pitch-drop G4->Root, Caixa com transient
-      F5->C#5, Chimbal staccato F#5 e viradas de caixa antes do drop do refrao).
+      Bateria Real (I31, t=0..448 e t=576..896: Kick, Snare, Hi-Hat, Crash, Toms).
+      Na Ponte antes do Refrao Final (t=448..576): Vocal na Oitava AGUDA (D#5..D#6, +1 oitava).
 
-Antes de rodar na impressora fisica, renderiza a simulacao acustica offline usando as 96 amostras
-reais do SoundFont (/home/shoomba/mainsail/soundfont/samples/{x,y,z}/) em 4 arquivos:
-  1. Canal A Isolado (Vocal)
-  2. Canal B Isolado (Instrumentos Principais)
-  3. Canal Z Isolado (Percussao de Fundo)
-  4. Mix Completa (Canais A + B + Z)
+Renderiza automaticamente os 3 canais separados + mix completa no Instrumento Virtual (SoundFont)
+antes de executar na impressora fisica.
 """
 
 from __future__ import annotations
@@ -29,19 +25,19 @@ import json
 import math
 import re
 import shutil
+import struct
 import subprocess
 import sys
 import wave
+from collections import defaultdict
 from pathlib import Path
 
 import numpy as np
-import yaml
 
 sys.path.insert(0, "/home/shoomba/printer_data/config/scripts")
 import bad_apple_compiler as bac
-import midi_to_corexy as mc
 
-USTX_PATH = Path("/home/shoomba/printer_data/config/scripts/midis/shoujo_a_ust/shoujo_a_3924.ustx")
+OS_BIN_PATH = Path("/home/shoomba/printer_data/config/scripts/midis/young_girl_a_os3710759.bin")
 MACROS_MUSIC_CFG = Path("/home/shoomba/printer_data/config/macros_music.cfg")
 FULL_GCODE_PATH = Path("/home/shoomba/printer_data/gcodes/YOUNG_GIRL_A_FULL.gcode")
 SOUNDFONT_DIR = Path("/home/shoomba/mainsail/soundfont")
@@ -50,221 +46,227 @@ ART_DIR = Path("/home/shoomba/.gemini/antigravity/brain/e94ad702-76ca-41e0-93ff-
 CFG_DIR = Path("/home/shoomba/printer_data/config")
 
 SAMPLE_RATE = 48000
+# OnlineSequencer time unit = 1 sixteenth note (4 units = 1 quarter-note beat @ 130 BPM)
+# Use DIV = 480 ticks per quarter note -> 1 OS time unit = 120 ticks!
 DIV = 480
-BAR_TICKS = 1920  # 4/4 @ 480 ticks/beat
-BPM = 260.0
-TEMPOS = [(0, int(round(60_000_000.0 / BPM)))]  # 230769 us/beat
+TICKS_PER_UNIT = 120
+BPM = 130.0
+TEMPOS = [(0, int(round(60_000_000.0 / BPM)))]  # 461538 us/beat
+
+BRIDGE_START = 448.0  # 51.7s ("Sutetekita yume o atsumete, chotto! chotto! ...")
+BRIDGE_END = 576.0    # 66.5s (Chorus drop "Aa toki ni toki ni...")
 
 
-def chord_for_bar(bar_idx: int) -> dict:
-    """
-    8-bar harmonic loop aligned to (bar_idx - 1) % 8:
-      Bars 0..1: Dbmaj7 (C#4=61, F4=65, G#4=68, C5=72, D#5=75)
-      Bars 2..3: C7     (C4=60,  E4=64, G4=67,  A#4=70, C5=72)
-      Bars 4..5: Fm7    (F4=65,  G#4=68, C5=72, D#5=75, F5=77)
-      Bars 6..7: Eb/Ab7 (D#4=63, G4=67, G#4=68, A#4=70, D#5=75)
-    """
-    phase = ((bar_idx - 1) % 8) // 2
-    if phase == 0:
-        return {
-            "name": "Dbmaj7",
-            "root_z": 61,  # C#4
-            "arp": [61, 65, 68, 72, 68, 65, 68, 72],
-            "riff": [73, 72, 68, 65, 68, 72, 73, 72],
-            "stab": 65,
-        }
-    if phase == 1:
-        return {
-            "name": "C7",
-            "root_z": 60,  # C4
-            "arp": [60, 64, 67, 70, 67, 64, 67, 70],
-            "riff": [72, 70, 67, 64, 67, 70, 72, 70],
-            "stab": 64,
-        }
-    if phase == 2:
-        return {
-            "name": "Fm7",
-            "root_z": 65,  # F4
-            "arp": [65, 68, 72, 75, 72, 68, 72, 75],
-            "riff": [77, 75, 72, 68, 72, 75, 77, 75],
-            "stab": 68,
-        }
-    return {
-        "name": "Eb7",
-        "root_z": 63,  # D#4
-        "arp": [63, 67, 70, 75, 70, 67, 68, 70],
-        "riff": [75, 73, 72, 70, 68, 70, 72, 75],
-        "stab": 67,
-    }
+def _read_varint(buf: bytes, i: int) -> tuple[int, int]:
+    res, shift = 0, 0
+    while True:
+        b = buf[i]
+        i += 1
+        res |= (b & 0x7F) << shift
+        if not (b & 0x80):
+            return res, i
+        shift += 7
 
 
-def build_young_girl_a_tracks(bar_start: int = 17, bar_end: int = 113) -> tuple[
+def _parse_proto_msg(buf: bytes) -> dict[int, list]:
+    fields: dict[int, list] = defaultdict(list)
+    i, n = 0, len(buf)
+    while i < n:
+        tag, i = _read_varint(buf, i)
+        fn, wt = tag >> 3, tag & 7
+        if wt == 0:
+            v, i = _read_varint(buf, i)
+            fields[fn].append(v)
+        elif wt == 1:
+            v = struct.unpack("<d", buf[i : i + 8])[0]
+            i += 8
+            fields[fn].append(v)
+        elif wt == 2:
+            ln, i = _read_varint(buf, i)
+            fields[fn].append(buf[i : i + ln])
+            i += ln
+        elif wt == 5:
+            v = struct.unpack("<f", buf[i : i + 4])[0]
+            i += 4
+            fields[fn].append(v)
+    return fields
+
+
+def load_os_sequence(path: Path) -> dict[int, list[tuple[float, float, int, float]]]:
+    top = _parse_proto_msg(path.read_bytes())
+    by_inst: dict[int, list[tuple[float, float, int, float]]] = defaultdict(list)
+    for nb in top.get(2, []):
+        nf = _parse_proto_msg(nb)
+        p = int(nf[1][0]) if 1 in nf else 0
+        t = float(nf[2][0]) if 2 in nf else 0.0
+        length = float(nf[3][0]) if 3 in nf else 1.0
+        inst = int(nf[4][0]) if 4 in nf else 0
+        vol = float(nf[5][0]) if 5 in nf else 1.0
+        by_inst[inst].append((t, length, p, vol))
+    return by_inst
+
+
+def clean_monophonic(notes: list[tuple[int, int, int]], artic_gap: int = 18) -> list[tuple[int, int, int]]:
+    """Resolve overlaps and insert a crisp articulation gap when consecutive notes share the same pitch."""
+    notes = sorted(notes, key=lambda x: (x[0], -x[2]))
+    # Deduplicate same start tick (keep first = highest priority/pitch)
+    dedup: list[tuple[int, int, int]] = []
+    for s, e, p in notes:
+        if dedup and dedup[-1][0] == s:
+            continue
+        dedup.append((s, e, p))
+    out: list[tuple[int, int, int]] = []
+    for i, (s, e, p) in enumerate(dedup):
+        if i + 1 < len(dedup):
+            ns, _, np_next = dedup[i + 1]
+            if e > ns:
+                e = ns
+            if np_next == p and (ns - e) < artic_gap and (e - s) > artic_gap * 2:
+                e = max(s + 20, ns - artic_gap)
+        if e > s:
+            out.append((s, e, p))
+    return out
+
+
+def build_tracks_from_os3710759() -> tuple[
     list[tuple[int, int, int]],
     list[tuple[int, int, int]],
     list[tuple[int, int, int]],
 ]:
-    """
-    Build (vA_vocal, vB_instruments, vZ_percussion) shifted so bar_start becomes tick 0.
-    Default range [Bar 17 .. Bar 113] (96 bars @ 260 BPM = 88.6s):
-      - Bar 17..25: Iconic 8-bar Instrumental Intro + Breakbeat Drums
-      - Bar 25..57: Verse 1 & 2 ("Boku no inochi tsuttatte...", "Kuchiru made no aizou o...")
-      - Bar 57..73: Pre-Chorus ("Sutetekita yume o atsumete, chotto! chotto! machigaeta kara, pa! pa!")
-      - Bar 73..113: Full Chorus ("Aa toki ni toki ni... samui samui...", "Aa kimi no... tooi tooi...", "Nanbanme demo...")
-    """
-    data = yaml.safe_load(USTX_PATH.read_text(encoding="utf-8-sig"))
-    vp_vocal = data["voice_parts"][0]
-    pos_vocal = int(vp_vocal["position"])
+    by_inst = load_os_sequence(OS_BIN_PATH)
 
-    # Also read Chorus harmony (VoicePart 1) to enrich Canal B during the Chorus
-    vp_harm = data["voice_parts"][1]
-    pos_harm = int(vp_harm["position"])
+    # Group chords by start time for each instrument
+    def group_by_time(inst_id: int) -> list[tuple[float, list[tuple[float, int]]]]:
+        grp: dict[float, list[tuple[float, int]]] = defaultdict(list)
+        for t, length, p, _v in by_inst.get(inst_id, []):
+            t_q = round(t * 4.0) / 4.0
+            grp[t_q].append((length, p))
+        return sorted(grp.items())
 
-    tk_offset = bar_start * BAR_TICKS
-    tk_max = bar_end * BAR_TICKS
+    vA_raw: list[tuple[int, int, int]] = []
+    vB_raw: list[tuple[int, int, int]] = []
+    vZ_raw: list[tuple[int, int, int]] = []
 
-    # ---------------- 1. CANAL A: VOCAL PRINCIPAL ----------------
-    vA: list[tuple[int, int, int]] = []
-    raw_vocal = []
-    for n in vp_vocal["notes"]:
-        s = pos_vocal + int(n["position"])
-        e = s + int(n["duration"])
-        p = int(n["tone"])
-        if s >= tk_offset and s < tk_max:
-            raw_vocal.append((s - tk_offset, min(e, tk_max) - tk_offset, p))
+    # ---------------- 1. CANAL A: INTRO RIFF (I41) + VOCAL PRINCIPAL (I23) ----------------
+    # Intro Lead Riff (I41, t=64..192): take top voice transposed -12 into golden zone (58..70)
+    for t, items in group_by_time(41):
+        if 64.0 <= t < 192.0:
+            items.sort(key=lambda x: x[1])
+            length, p = items[-1]
+            p_adj = p - 12  # 70..82 -> 58..70 (A#3..A#4)
+            s_tk = int(round(t * TICKS_PER_UNIT))
+            e_tk = int(round((t + max(0.5, length)) * TICKS_PER_UNIT))
+            vA_raw.append((s_tk, e_tk, p_adj))
 
-    # Add a 30-tick (28ms) syllable articulation breath when consecutive notes share the exact same pitch
-    for i, (s, e, p) in enumerate(raw_vocal):
-        if i + 1 < len(raw_vocal):
-            ns, _, np_next = raw_vocal[i + 1]
-            if ns <= e and np_next == p and (e - s) > 90:
-                e = e - 30
-        if e > s:
-            vA.append((s, e, p))
+    # Vocal Principal (I23, t=192..896):
+    # Note: in verse/bridge (t<576), I23 is in 75..87 -> shift -12 to 63..75 (D#4..D#5).
+    # In chorus (t>=576), I23 has octave doubles like (72, 84) -> taking min pitch gives 65..77 (F4..F5)!
+    for t, items in group_by_time(23):
+        items.sort(key=lambda x: x[1])
+        length_lo, p_lo = items[0]
+        length_hi, p_hi = items[-1]
 
-    # Build harmony lookup by bar/tick for Chorus Canal B enrichment
-    harm_by_tick: list[tuple[int, int, int]] = []
-    for n in vp_harm["notes"]:
-        s = pos_harm + int(n["position"])
-        e = s + int(n["duration"])
-        p = int(n["tone"]) - 12  # Bring harmony into C4..F4 mid register to complement lead vocal
-        if s >= tk_offset and s < tk_max:
-            harm_by_tick.append((s - tk_offset, min(e, tk_max) - tk_offset, p))
-
-    # ---------------- 2. CANAL B: INSTRUMENTOS PRINCIPAIS ----------------
-    vB: list[tuple[int, int, int]] = []
-    # ---------------- 3. CANAL Z: PERCUSSAO / BATIDA DE FUNDO ----------------
-    vZ: list[tuple[int, int, int]] = []
-
-    for bar in range(bar_start, bar_end):
-        b0 = (bar - bar_start) * BAR_TICKS
-        ch = chord_for_bar(bar)
-        is_intro = (bar < 25) or (109 <= bar < 113)
-        is_stop_break = bar in (64, 65, 66, 67, 136, 137, 138, 139)
-        is_papa_break = bar in (71, 72, 140)
-        is_prechorus = (57 <= bar < 64) or (68 <= bar < 71) or (129 <= bar < 136)
-        is_chorus = (73 <= bar < 109) or (141 <= bar < 219)
-
-        # === CANAL B (INSTRUMENTOS PRINCIPAIS) ===
-        if is_intro:
-            # Signature fast 8th-note piano/synth riff (8 notes per bar, 240 ticks each)
-            for step_i, pitch in enumerate(ch["riff"]):
-                s = b0 + step_i * 240
-                e = s + 215
-                vB.append((s, e, pitch))
-        elif is_stop_break:
-            # Dramatic staccato chord hit on Beat 0 ("chotto! ... chotto!") + silence break
-            vB.append((b0, b0 + 720, ch["stab"]))
-        elif is_papa_break:
-            # "ra... pa! pa!" dramatic hits before Chorus drop
-            if bar in (71, 140):
-                vB.append((b0, b0 + 440, ch["stab"]))
-                vB.append((b0 + 960, b0 + 1400, ch["stab"] + 4))
-            else:
-                # Bar 72: "pa!" hit on beat 0 + rising synth glissando into Chorus
-                vB.append((b0, b0 + 440, ch["stab"] + 7))
-                for g_i, gp in enumerate([63, 65, 68, 70]):
-                    vB.append((b0 + 960 + g_i * 240, b0 + 960 + (g_i + 1) * 240 - 20, gp))
-        elif is_prechorus:
-            # Driving 4-beat rising piano arpeggio
-            for beat_i in range(4):
-                p = ch["arp"][beat_i * 2]
-                s = b0 + beat_i * 480
-                vB.append((s, s + 430, p))
-        elif is_chorus:
-            # High-energy driving synth/guitar accompaniment (8th-note pulse alternating root & chord tone)
-            for step_i in range(8):
-                s = b0 + step_i * 240
-                e = s + 215
-                p = ch["arp"][step_i]
-                vB.append((s, e, p))
+        if BRIDGE_START <= t < BRIDGE_END:
+            # PONTE ANTES DO REFRAO FINAL (t=448..576):
+            # Todos os 3 eixos tocam a trilha vocal em OITAVAS DIFERENTES!
+            # Raw vocal in bridge is 75..87 (D#5..D#6):
+            #   - Canal B (Eixo Y, Grave): p - 24 -> 51..63 (D#3..D#4)
+            #   - Canal A (Eixo X, Media): p - 12 -> 63..75 (D#4..D#5)
+            #   - Canal Z (Eixo Z, Aguda): p      -> 75..87 (D#5..D#6)
+            p_raw = p_hi
+            s_tk = int(round(t * TICKS_PER_UNIT))
+            dur_tk = max(120, int(round(max(length_lo, length_hi) * TICKS_PER_UNIT)))
+            e_tk = s_tk + dur_tk
+            vA_raw.append((s_tk, e_tk, p_raw - 12))
+            vB_raw.append((s_tk, e_tk, p_raw - 24))
+            vZ_raw.append((s_tk, e_tk, p_raw))
         else:
-            # Verse: syncopated Rhodes/piano chord comping (beats 0, 1.5, 2.5, 3.0) + fill on odd bars
-            pattern = [
-                (0, 380, ch["arp"][0]),
-                (720, 1100, ch["arp"][1]),
-                (1200, 1580, ch["arp"][2]),
-                (1680, 1890, ch["arp"][3]),
-            ]
-            for ds, de, p in pattern:
-                vB.append((b0 + ds, b0 + de, p))
+            # Outside bridge: keep Canal A cleanly in F4..F5 (63..77)
+            p_use = p_lo if p_lo <= 77 else (p_lo - 12)
+            s_tk = int(round(t * TICKS_PER_UNIT))
+            e_tk = int(round((t + max(0.5, length_lo)) * TICKS_PER_UNIT))
+            vA_raw.append((s_tk, e_tk, p_use))
 
-        # === CANAL Z (PERCUSSAO DE FUNDO / BREAKBEAT) ===
-        if is_stop_break:
-            # Heavy Kick + Crash accent on beat 0 ("chotto!") then total drum silence
-            vZ.append((b0, b0 + 140, 72))             # Crash/Attack C5
-            vZ.append((b0 + 140, b0 + 480, ch["root_z"]))  # Deep Kick sustain
-        elif is_papa_break:
-            if bar == 71:
-                # Kick on 0 ("ra") and Snare hit on beat 2 ("pa!")
-                vZ.append((b0, b0 + 160, 67))
-                vZ.append((b0 + 160, b0 + 420, ch["root_z"]))
-                vZ.append((b0 + 960, b0 + 1140, 77))
-                vZ.append((b0 + 1140, b0 + 1400, 73))
-            else:
-                # Bar 72: Hit on beat 0 ("pa!") + 4-stroke Snare Roll fill (beats 2..4) into Chorus
-                vZ.append((b0, b0 + 160, 77))
-                vZ.append((b0 + 160, b0 + 440, ch["root_z"]))
-                for r_i, rp in enumerate([74, 75, 77, 79]):
-                    rs = b0 + 960 + r_i * 240
-                    vZ.append((rs, rs + 200, rp))
+    # ---------------- 2. CANAL B: GUITARRA (I44) + OUTRO (I52) ----------------
+    # Electric Guitar (I44, t=0..448 and t=576..832): take highest voice of each strummed chord (51..68)
+    for t, items in group_by_time(44):
+        if BRIDGE_START <= t < BRIDGE_END:
+            continue
+        items.sort(key=lambda x: x[1])
+        length, p = items[-1]
+        s_tk = int(round(t * TICKS_PER_UNIT))
+        e_tk = int(round((t + max(0.5, min(length, 2.0))) * TICKS_PER_UNIT))
+        vB_raw.append((s_tk, e_tk, p))
+
+    # Outro Synth/Guitar (I52, t=832..896) after I44 finishes at 830
+    for t, items in group_by_time(52):
+        if t >= 832.0:
+            items.sort(key=lambda x: x[1])
+            length, p = items[-1]
+            s_tk = int(round(t * TICKS_PER_UNIT))
+            e_tk = int(round((t + max(1.0, length)) * TICKS_PER_UNIT))
+            vB_raw.append((s_tk, e_tk, p))
+
+    # ---------------- 3. CANAL Z: BATERIA REAL (I31) ----------------
+    # Priority: Snare (38,40) > Kick (36) > Crash/China (49,52) > Toms (45,48) > Open Hat (46) > Closed Hat/Tamb (42,44,54)
+    def drum_priority(p: int) -> int:
+        if p in (38, 40):
+            return 6
+        if p == 36:
+            return 5
+        if p in (49, 52):
+            return 4
+        if p in (45, 48):
+            return 3
+        if p == 46:
+            return 2
+        return 1
+
+    for t, items in group_by_time(31):
+        if BRIDGE_START <= t < BRIDGE_END:
+            # Bridge uses all 3 axes on the vocal track in different octaves!
+            continue
+        items.sort(key=lambda x: drum_priority(x[1]), reverse=True)
+        _, p_drum = items[0]
+        s_tk = int(round(t * TICKS_PER_UNIT))
+
+        if p_drum in (38, 40):
+            # Snare: sharp 2-step crack (F5 -> C#5)
+            vZ_raw.append((s_tk, s_tk + 36, 77))
+            vZ_raw.append((s_tk + 36, s_tk + 96, 73))
+        elif p_drum == 36:
+            # Kick: punchy pitch-drop thump (G4 -> C4)
+            vZ_raw.append((s_tk, s_tk + 36, 67))
+            vZ_raw.append((s_tk + 36, s_tk + 102, 60))
+        elif p_drum in (49, 52):
+            # Crash / China Cymbal: bright metallic accent (G#5 -> G5)
+            vZ_raw.append((s_tk, s_tk + 48, 80))
+            vZ_raw.append((s_tk + 48, s_tk + 108, 79))
+        elif p_drum in (45, 48):
+            # Tom
+            vZ_raw.append((s_tk, s_tk + 90, 67 if p_drum == 48 else 64))
+        elif p_drum == 46:
+            # Open Hi-Hat
+            vZ_raw.append((s_tk, s_tk + 72, 78))
         else:
-            # Signature fast 260 BPM Vocaloid Breakbeat:
-            # Beat 0 (0..420): Kick Drum (transient G4 -> bass root)
-            vZ.append((b0, b0 + 130, 67))
-            vZ.append((b0 + 130, b0 + 420, ch["root_z"]))
-            # Beat 1 (480..680): Closed Hi-Hat tick (F#5=78)
-            vZ.append((b0 + 480, b0 + 660, 78))
-            # Beat 1.5 (720..900): Syncopated Ghost Kick (in Chorus & Intro)
-            if is_chorus or is_intro:
-                vZ.append((b0 + 720, b0 + 900, ch["root_z"]))
-            # Beat 2 (960..1360): Snare Drum Crack (F5=77 -> C#5=73)
-            vZ.append((b0 + 960, b0 + 1120, 77))
-            vZ.append((b0 + 1120, b0 + 1360, 73))
-            # Beat 3 (1440..1620): Open Hi-Hat tick (G5=79)
-            vZ.append((b0 + 1440, b0 + 1620, 79))
-            # Beat 3.5 (1680..1860): Pickup Kick into next bar
-            vZ.append((b0 + 1680, b0 + 1860, 65))
+            # Closed Hi-Hat / Tambourine / Rim
+            vZ_raw.append((s_tk, s_tk + 48, 76))
 
-    return vA, vB, vZ
+    return (
+        clean_monophonic(vA_raw, artic_gap=18),
+        clean_monophonic(vB_raw, artic_gap=16),
+        clean_monophonic(vZ_raw, artic_gap=8),
+    )
 
 
 def simulate_channels_with_soundfont(
     gcode_lines: list[str],
-    out_prefix: str = "YOUNG_GIRL_A_Sim",
+    out_prefix: str = "YOUNG_GIRL_A_OS_Sim",
 ) -> dict[str, Path]:
-    """
-    Parse the compiled G-code and render 4 offline audio simulations using the 96 real
-    recorded 48 kHz stepper motor samples from /home/shoomba/mainsail/soundfont/samples/{x,y,z}/:
-      1. Canal A (Vocal)
-      2. Canal B (Instrumentos Principais)
-      3. Canal Z (Percussao de Fundo)
-      4. Mix Completa (Canais A + B + Z)
-    """
     manifest = json.loads(MANIFEST_PATH.read_text())
     midi_min = int(manifest.get("midi_min", 48))
     midi_max = int(manifest.get("midi_max", 79))
 
-    # Load all 96 WAV samples into memory
     samples_bank: dict[str, dict[int, tuple[np.ndarray, dict]]] = {"x": {}, "y": {}, "z": {}}
     for ax in ("x", "y", "z"):
         for m_str, meta in manifest["axes"][ax].items():
@@ -275,7 +277,6 @@ def simulate_channels_with_soundfont(
                 arr = np.frombuffer(raw, dtype=np.int16).astype(np.float64) / 32768.0
             samples_bank[ax][m_int] = (arr, meta)
 
-    # Parse G-code into (t_start, dur_s, hz_A, hz_B, hz_Z)
     events = []
     cur_t = 0.0
     in_rel = True
@@ -324,11 +325,11 @@ def simulate_channels_with_soundfont(
             hz_a = (abs(dx + dy) * 80.0) / dur if abs(dx + dy) > 1e-5 else 0.0
             hz_b = (abs(dx - dy) * 80.0) / dur if abs(dx - dy) > 1e-5 else 0.0
             hz_z = (abs(dz) * 1200.00075) / dur if abs(dz) > 1e-6 else 0.0
-            if hz_a < 55 or hz_a > 2200:
+            if hz_a < 55 or hz_a > 2400:
                 hz_a = 0.0
-            if hz_b < 55 or hz_b > 2200:
+            if hz_b < 55 or hz_b > 2400:
                 hz_b = 0.0
-            if hz_z < 55 or hz_z > 2200:
+            if hz_z < 55 or hz_z > 2400:
                 hz_z = 0.0
             events.append((cur_t, dur, hz_a, hz_b, hz_z))
             cur_t += dur
@@ -349,7 +350,6 @@ def simulate_channels_with_soundfont(
 
         n_out = max(16, int(round(dur_s * SAMPLE_RATE)))
         src_positions = np.arange(n_out, dtype=np.float64) * rate
-        # Map positions beyond loop_s into [loop_s, loop_e)
         over = src_positions >= loop_s
         src_positions[over] = loop_s + np.mod(src_positions[over] - loop_s, loop_len)
         src_positions = np.clip(src_positions, 0, len(src_arr) - 2)
@@ -358,7 +358,6 @@ def simulate_channels_with_soundfont(
         frac = src_positions - idx0
         out = (1.0 - frac) * src_arr[idx0] + frac * src_arr[idx0 + 1]
 
-        # Apply smooth 4 ms attack and 10 ms release envelope
         att = min(n_out // 3, int(0.004 * SAMPLE_RATE))
         rel = min(n_out // 3, int(0.010 * SAMPLE_RATE))
         if att > 1:
@@ -382,13 +381,12 @@ def simulate_channels_with_soundfont(
             i1 = min(total_samples, i0 + len(w))
             buf_z[i0:i1] += w[: i1 - i0]
 
-    # Combined 3-channel mix (balanced so Vocal A stands out clearly over Instruments B and Percussion Z)
-    buf_mix = 1.05 * buf_a + 0.80 * buf_b + 0.90 * buf_z
+    buf_mix = 1.05 * buf_a + 0.85 * buf_b + 0.90 * buf_z
 
     outputs = {
         "Canal_A_Vocal": buf_a,
-        "Canal_B_Instrumentos": buf_b,
-        "Canal_Z_Percussao": buf_z,
+        "Canal_B_Guitarra": buf_b,
+        "Canal_Z_Bateria": buf_z,
         "Mix_Completa_ABZ": buf_mix,
     }
     saved_paths: dict[str, Path] = {}
@@ -409,9 +407,9 @@ def simulate_channels_with_soundfont(
             wf.setframerate(SAMPLE_RATE)
             wf.writeframes(pcm16.tobytes())
 
-        # Encode Gateway-friendly MP3 (< 700 KB, 64 kbps mono 32 kHz)
+        # 48 kbps mono 32 kHz -> ~615 KB for 103s (passes Gateway cleanly!)
         subprocess.run(
-            ["ffmpeg", "-y", "-i", str(wav_p), "-ac", "1", "-ar", "32000", "-b:a", "64k", str(mp3_p)],
+            ["ffmpeg", "-y", "-i", str(wav_p), "-ac", "1", "-ar", "32000", "-b:a", "48k", str(mp3_p)],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             check=True,
@@ -424,39 +422,23 @@ def simulate_channels_with_soundfont(
 
 
 def main() -> int:
-    # 1. Build 88.6s macro version (Intro + Verse 1/2 + Pre-Chorus + Full Chorus)
-    vA_short, vB_short, vZ_short = build_young_girl_a_tracks(bar_start=17, bar_end=113)
-    cmds_short, stats_short = bac.compile_3axis_gcode(
-        vA_short,
-        vB_short,
-        vZ_short,
-        DIV,
-        TEMPOS,
-    )
-    print(f"[YoungGirlA] Macro (Intro..Refrao): {stats_short}", flush=True)
+    vA, vB, vZ = build_tracks_from_os3710759()
+    print(f"[OS3710759] Notas extraidas: A (Vocal+Intro)={len(vA)} | B (Guitarra+Ponte)={len(vB)} | Z (Bateria+Ponte)={len(vZ)}", flush=True)
 
-    # 2. Build full 186s G-code file version (Bar 17..219)
-    vA_full, vB_full, vZ_full = build_young_girl_a_tracks(bar_start=17, bar_end=219)
-    cmds_full, stats_full = bac.compile_3axis_gcode(
-        vA_full,
-        vB_full,
-        vZ_full,
-        DIV,
-        TEMPOS,
-    )
-    print(f"[YoungGirlA] Full G-code: {stats_full}", flush=True)
+    cmds, stats = bac.compile_3axis_gcode(vA, vB, vZ, DIV, TEMPOS)
+    print(f"[OS3710759] Compilado 3 Eixos: {stats}", flush=True)
 
-    # Save YOUNG_GIRL_A_FULL.gcode
+    # Save YOUNG_GIRL_A_FULL.gcode (full 103.4s from OnlineSequencer 3710759)
     full_lines = [
-        "; Siinamota - Young Girl A (Shoujo A / 少女A) — 3 Eixos (A=Vocal, B=Instrumentos, Z=Percussao)",
-        f"; Duracao: {stats_full['duration_s']}s | Movimentos: {stats_full['moves']} | Bounding Box: X{stats_full['x_phys_range']} Y{stats_full['y_phys_range']} Z{stats_full['z_phys_range']}",
+        "; Siinamota - Young Girl A (OnlineSequencer #3710759) — 3 Eixos (A=Vocal, B=Guitarra, Z=Bateria + Ponte 3 Oitavas)",
+        f"; Duracao: {stats['duration_s']}s | Movimentos: {stats['moves']} | Bounding Box: X{stats['x_phys_range']} Y{stats['y_phys_range']} Z{stats['z_phys_range']}",
         "G28",
         "G90",
         "G1 X90.000 Y87.000 Z25.000 F6000",
         "_AUDIO_MODE_COMPACTO_ON",
         "_AUDIO_MODE_Z_ON",
         "G91",
-        *cmds_full,
+        *cmds,
         "_AUDIO_MODE_Z_OFF",
         "_AUDIO_MODE_OFF",
         "G90",
@@ -465,10 +447,10 @@ def main() -> int:
     ]
     FULL_GCODE_PATH.write_text("\n".join(full_lines) + "\n")
 
-    # Add/Update [gcode_macro YOUNG_GIRL_A] in macros_music.cfg
+    # Update [gcode_macro YOUNG_GIRL_A] in macros_music.cfg
     macro_block = "\n".join([
         "[gcode_macro YOUNG_GIRL_A]",
-        "description: Siinamota - Young Girl A / Shoujo A (3 Eixos: A=Vocal, B=Instrumentos, Z=Percussao, 88s)",
+        "description: Siinamota - Young Girl A (OS#3710759: A=Vocal, B=Guitarra, Z=Bateria, Ponte 3 Oitavas, 103s)",
         "gcode:",
         '  {% if "xyz" not in printer.toolhead.homed_axes %}',
         "    G28",
@@ -479,7 +461,7 @@ def main() -> int:
         "  _AUDIO_MODE_COMPACTO_ON",
         "  _AUDIO_MODE_Z_ON",
         "  G91",
-        *[f"  {c}" for c in cmds_short],
+        *[f"  {c}" for c in cmds],
         "  _AUDIO_MODE_Z_OFF",
         "  _AUDIO_MODE_OFF",
         "  G90",
@@ -499,9 +481,9 @@ def main() -> int:
         cfg_text = cfg_text.rstrip() + "\n\n" + macro_block + "\n"
     MACROS_MUSIC_CFG.write_text(cfg_text)
 
-    # 3. Render the 3 separate channels + full mix using the Virtual Instrument / SoundFont
-    print("[YoungGirlA] Renderizando simulacao no Instrumento Virtual (Canais A, B, Z separados e Mix)...", flush=True)
-    sim_paths = simulate_channels_with_soundfont(cmds_short, out_prefix="YOUNG_GIRL_A_Sim")
+    # Render the 3 separate channels + full mix with the Virtual Instrument (SoundFont)
+    print("[OS3710759] Renderizando simulacao no Instrumento Virtual (Canais A, B, Z separados e Mix)...", flush=True)
+    sim_paths = simulate_channels_with_soundfont(cmds, out_prefix="YOUNG_GIRL_A_OS_Sim")
     for k, p in sim_paths.items():
         print(f"  -> {k}: {p} ({p.stat().st_size / 1024.0:.1f} KB)", flush=True)
 
