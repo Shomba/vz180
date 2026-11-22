@@ -138,69 +138,66 @@ def slice_batch_notes(
     hp_sos: np.ndarray,
 ) -> list[tuple[int, np.ndarray, dict]]:
     """
-    Locate each note in a recorded batch using first-note onset + exact kinematic trapezoid timing
-    + narrow-band harmonic energy refinement around target_hz.
+    Locate each note in a recorded batch using high-resolution narrow-band (+/-1.8%, +/-30 cents)
+    spectral energy at target_hz (zero overlap with adjacent semitones!) + monotonic sequence constraint.
     """
     clean_full = spectral_denoise(batch_audio, noise_mag_profile, hp_sos)
-    win_size = 1024
-    hop = 240  # 5 ms hop @ 48 kHz
+    win_size = 2048
+    n_fft_track = 8192  # 5.86 Hz bin resolution @ 48 kHz
+    hop = 240           # 5 ms hop @ 48 kHz
     hann = np.hanning(win_size)
-    fft_freqs = np.fft.rfftfreq(win_size, d=1.0 / SAMPLE_RATE)
+    fft_freqs = np.fft.rfftfreq(n_fft_track, d=1.0 / SAMPLE_RATE)
 
-    # Detect actual acoustic onset of Note 0 in the buffer
-    env_hop = 240
-    n_env = max(1, (len(clean_full) - env_hop) // env_hop)
-    rms_env = np.array([
-        float(np.sqrt(np.mean(clean_full[i * env_hop : (i + 1) * env_hop] ** 2)))
-        for i in range(n_env)
-    ])
-    noise_floor = float(np.percentile(rms_env, 18) + 1e-6)
-    peak_env = float(np.max(rms_env) + 1e-6)
-    thresh = max(noise_floor * 3.2, peak_env * 0.14)
-    above = np.where(rms_env >= thresh)[0]
-    if len(above) > 0:
-        first_onset_s = max(0.02, float(above[0] * env_hop) / SAMPLE_RATE)
-    else:
-        first_onset_s = lead_in_s
+    n_frames = max(1, (len(clean_full) - win_size) // hop)
+    spec_matrix = np.zeros((n_frames, len(fft_freqs)), dtype=np.float64)
+    for f_i in range(n_frames):
+        frame = clean_full[f_i * hop : f_i * hop + win_size] * hann
+        spec_matrix[f_i] = np.abs(np.fft.rfft(frame, n=n_fft_track))
 
-    cum_t = first_onset_s
+    # Subtract median background spectrum across the batch so continuous fan tones vanish
+    bg_spec = np.percentile(spec_matrix, 25, axis=0)
+    fg_matrix = np.maximum(spec_matrix - 1.35 * bg_spec[None, :], 0.0)
+
+    box_frames = max(4, int((note_dur_s * 0.78) * SAMPLE_RATE / hop))
+    box_kernel = np.ones(box_frames, dtype=np.float64)
+    min_step_frames = int((note_dur_s + gap_s * 0.65) * SAMPLE_RATE / hop)
+    nom_step_frames = int((note_dur_s + gap_s) * SAMPLE_RATE / hop)
+
     results = []
+    prev_onset_frame: int | None = None
+
     for idx, midi in enumerate(midis):
         target_hz = midi_to_hz(midi)
-        expected_start_s = cum_t
-        actual_dur_s = calc_actual_note_dur(axis, midi, note_dur_s)
-        cum_t += actual_dur_s + gap_s
-
-        search_t0 = max(0.01, expected_start_s - 0.12)
-        search_t1 = min(len(clean_full) / SAMPLE_RATE - 0.02, expected_start_s + actual_dur_s + 0.14)
-
-        s0 = int(search_t0 * SAMPLE_RATE)
-        s1 = int(search_t1 * SAMPLE_RATE)
-        seg = clean_full[s0:s1]
-
-        # Build harmonic mask for target_hz (1x, 2x, 3x, 4x)
+        # Strict +/-1.8% (+/-31 cents) mask around fundamental & 2nd harmonic — never overlaps adjacent semitones (+/-5.9%)!
         h_mask = np.zeros_like(fft_freqs, dtype=bool)
-        for mult in (1.0, 2.0, 3.0, 4.0):
+        for mult, weight in ((1.0, 1.0), (2.0, 0.45)):
             hf = target_hz * mult
             if hf < SAMPLE_RATE * 0.45:
-                h_mask |= (fft_freqs >= hf * 0.94) & (fft_freqs <= hf * 1.06)
+                h_mask |= (fft_freqs >= hf * 0.982) & (fft_freqs <= hf * 1.018)
 
-        # Slide window across search region to find maximum harmonic energy plateau
-        n_frames = max(1, (len(seg) - win_size) // hop)
-        energies = np.zeros(n_frames, dtype=np.float64)
-        for f_i in range(n_frames):
-            frame = seg[f_i * hop : f_i * hop + win_size] * hann
-            sp = np.abs(np.fft.rfft(frame))
-            energies[f_i] = float(np.sum(sp[h_mask] ** 2))
-
-        # Smooth energy with a boxcar of length ~0.75 * note_dur_s to find best note onset
-        box_frames = max(3, int((note_dur_s * 0.82) * SAMPLE_RATE / hop))
-        if len(energies) > box_frames:
-            conv = np.convolve(energies, np.ones(box_frames), mode="valid")
-            best_frame = int(np.argmax(conv))
-            onset_sample = s0 + best_frame * hop
+        note_energy = np.sum(fg_matrix[:, h_mask] ** 2, axis=1)
+        if len(note_energy) > box_frames:
+            conv = np.convolve(note_energy, box_kernel, mode="valid")
         else:
-            onset_sample = int(expected_start_s * SAMPLE_RATE)
+            conv = note_energy
+
+        if prev_onset_frame is None:
+            # Note 0 must start within the first 1.1s of the recording
+            f_lo = 0
+            f_hi = min(len(conv) - 1, int(1.10 * SAMPLE_RATE / hop))
+        else:
+            # Subsequent note idx must start roughly 1 stride after prev_onset_frame
+            f_lo = max(prev_onset_frame + min_step_frames, prev_onset_frame + nom_step_frames - int(0.14 * SAMPLE_RATE / hop))
+            f_hi = min(len(conv) - 1, prev_onset_frame + nom_step_frames + int(0.22 * SAMPLE_RATE / hop))
+
+        if f_lo >= len(conv):
+            f_lo = max(0, len(conv) - 1)
+        if f_hi < f_lo:
+            f_hi = f_lo
+
+        best_frame = f_lo + int(np.argmax(conv[f_lo : f_hi + 1]))
+        prev_onset_frame = best_frame
+        onset_sample = best_frame * hop + int(0.015 * SAMPLE_RATE)
 
         # Extract note_dur_s sample starting slightly inside onset
         want_len = int(round(note_dur_s * SAMPLE_RATE))
