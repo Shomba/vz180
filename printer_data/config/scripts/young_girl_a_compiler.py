@@ -432,9 +432,6 @@ def main() -> int:
         vZ_short,
         DIV,
         TEMPOS,
-        max_duration_s=95.0,
-        xy_octave_mult=1.0,
-        z_octave_mult=1.0,
     )
     print(f"[YoungGirlA] Macro (Intro..Refrao): {stats_short}", flush=True)
 
@@ -446,9 +443,6 @@ def main() -> int:
         vZ_full,
         DIV,
         TEMPOS,
-        max_duration_s=240.0,
-        xy_octave_mult=1.0,
-        z_octave_mult=1.0,
     )
     print(f"[YoungGirlA] Full G-code: {stats_full}", flush=True)
 
