@@ -202,7 +202,11 @@ def compile_3axis_gcode(
 ) -> tuple[list[str], dict]:
     t2s = mc.make_tick_to_sec(div_h, tempos_h)
     scale_xy = orig_ms_xy / float(target_ms_xy)  # 4.0
-    pulses_per_cmd_mm_xy = (200.0 * orig_ms_xy) / rot_xy  # 80.0
+    # +2 oitavas em XY (4x frequencia/velocidade: 1 passo inteiro = 4 micropassos por ciclo de f_target!)
+    xy_octave_mult = 4.0
+    pulses_per_cmd_mm_xy = ((200.0 * orig_ms_xy) / rot_xy) / xy_octave_mult  # 80.0 / 4.0 = 20.0
+    min_x_box, max_x_box = 18.0, 162.0
+    min_y_box, max_y_box = 18.0, 156.0
 
     ticks = set()
     for v in (voice_A, voice_B, voice_Z):
@@ -266,92 +270,100 @@ def compile_3axis_gcode(
         fB = mc.midi_to_hz(pB) if pB is not None else 0.0
         fZ = mc.midi_to_hz(pZ) if pZ is not None else 0.0
 
-        mag_A_cmd = (fA / pulses_per_cmd_mm_xy) * dt
-        mag_B_cmd = (fB / pulses_per_cmd_mm_xy) * dt
-        mag_Z_cmd = (fZ / PULSES_PER_CMD_MM_Z) * dt
+        # Sub-divide any long note that would exceed 65 mm belt travel at +2 octaves
+        max_belt_phys = max(fA, fB) * 0.2 * dt
+        n_sub = max(1, int(math.ceil(max_belt_phys / 65.0)))
+        sub_dt = dt / n_sub
 
-        cand_sA = [1, -1] if pA is not None else [0]
-        cand_sB = [1, -1] if pB is not None else [0]
-        best_xy = None
-        best_xy_cost = 1e18
-        for sA in cand_sA:
-            for sB in cand_sB:
-                dx_cmd = 0.5 * (sA * mag_A_cmd + sB * mag_B_cmd)
-                dy_cmd = 0.5 * (sA * mag_A_cmd - sB * mag_B_cmd)
-                nx = x_phys + dx_cmd * scale_xy
-                ny = y_phys + dy_cmd * scale_xy
-                if not (mc.MIN_X <= nx <= mc.MAX_X and mc.MIN_Y <= ny <= mc.MAX_Y):
+        for sub_i in range(n_sub):
+            mag_A_cmd = (fA / pulses_per_cmd_mm_xy) * sub_dt
+            mag_B_cmd = (fB / pulses_per_cmd_mm_xy) * sub_dt
+            mag_Z_cmd = (fZ / PULSES_PER_CMD_MM_Z) * sub_dt
+
+            cand_sA = [1, -1] if pA is not None else [0]
+            cand_sB = [1, -1] if pB is not None else [0]
+            best_xy = None
+            best_xy_cost = 1e18
+            for sA in cand_sA:
+                for sB in cand_sB:
+                    dx_cmd = 0.5 * (sA * mag_A_cmd + sB * mag_B_cmd)
+                    dy_cmd = 0.5 * (sA * mag_A_cmd - sB * mag_B_cmd)
+                    nx = x_phys + dx_cmd * scale_xy
+                    ny = y_phys + dy_cmd * scale_xy
+                    if not (min_x_box <= nx <= max_x_box and min_y_box <= ny <= max_y_box):
+                        continue
+                    cost = (nx - mc.CENTER_X) ** 2 + (ny - mc.CENTER_Y) ** 2
+                    if sub_i == 0:
+                        if pA is not None and onA and pA == last_pA and sA == last_sA:
+                            cost += 1200.0
+                        if pB is not None and onB and pB == last_pB and sB == last_sB:
+                            cost += 1200.0
+                        if pA is not None and not onA and sA != last_sA:
+                            cost += 2200.0
+                        if pB is not None and not onB and sB != last_sB:
+                            cost += 2200.0
+                    if cost < best_xy_cost:
+                        best_xy_cost = cost
+                        best_xy = (sA, sB, dx_cmd, dy_cmd)
+
+            cand_sZ = [1, -1] if pZ is not None else [0]
+            best_sZ = 0
+            best_z_cost = 1e18
+            for sZ in cand_sZ:
+                nz = z_phys + (sZ * mag_Z_cmd) * SCALE_Z
+                if not (MIN_Z <= nz <= MAX_Z):
                     continue
-                cost = (nx - mc.CENTER_X) ** 2 + (ny - mc.CENTER_Y) ** 2
-                if pA is not None and onA and pA == last_pA and sA == last_sA:
-                    cost += 1200.0
-                if pB is not None and onB and pB == last_pB and sB == last_sB:
-                    cost += 1200.0
-                if pA is not None and not onA and sA != last_sA:
-                    cost += 2500.0
-                if pB is not None and not onB and sB != last_sB:
-                    cost += 2500.0
-                if cost < best_xy_cost:
-                    best_xy_cost = cost
-                    best_xy = (sA, sB, dx_cmd, dy_cmd)
+                cost = (nz - CENTER_Z) ** 2
+                if sub_i == 0:
+                    if pZ is not None and onZ and pZ == last_pZ and sZ == last_sZ:
+                        cost += 80.0
+                    if pZ is not None and not onZ and sZ != last_sZ:
+                        cost += 120.0
+                if cost < best_z_cost:
+                    best_z_cost = cost
+                    best_sZ = sZ
 
-        cand_sZ = [1, -1] if pZ is not None else [0]
-        best_sZ = 0
-        best_z_cost = 1e18
-        for sZ in cand_sZ:
-            nz = z_phys + (sZ * mag_Z_cmd) * SCALE_Z
-            if not (MIN_Z <= nz <= MAX_Z):
+            sA, sB, dx_cmd, dy_cmd = best_xy
+            dz_cmd = best_sZ * mag_Z_cmd
+
+            dx_q = round(dx_cmd, 5)
+            dy_q = round(dy_cmd, 5)
+            dz_q = round(dz_cmd, 5)
+            L_cmd = math.sqrt(dx_q * dx_q + dy_q * dy_q + dz_q * dz_q)
+            if L_cmd < 1e-6:
                 continue
-            cost = (nz - CENTER_Z) ** 2
-            if pZ is not None and onZ and pZ == last_pZ and sZ == last_sZ:
-                cost += 80.0
-            if pZ is not None and not onZ and sZ != last_sZ:
-                cost += 120.0
-            if cost < best_z_cost:
-                best_z_cost = cost
-                best_sZ = sZ
 
-        sA, sB, dx_cmd, dy_cmd = best_xy
-        dz_cmd = best_sZ * mag_Z_cmd
+            if abs(dz_q) > 1e-6:
+                raw_safe_accel = min(3000.0, SAFE_Z_CMD_ACCEL * (L_cmd / abs(dz_q)))
+            else:
+                raw_safe_accel = 3000.0
+            for b in (60, 250, 900, 3000):
+                if raw_safe_accel >= b:
+                    bucket = b
+            if bucket != cur_accel_bucket:
+                lines.append(f"SET_VELOCITY_LIMIT ACCEL={bucket}")
+                cur_accel_bucket = bucket
 
-        dx_q = round(dx_cmd, 5)
-        dy_q = round(dy_cmd, 5)
-        dz_q = round(dz_cmd, 5)
-        L_cmd = math.sqrt(dx_q * dx_q + dy_q * dy_q + dz_q * dz_q)
-        if L_cmd < 1e-6:
-            continue
+            f_cmd = round((L_cmd / sub_dt) * 60.0, 2)
+            lines.append(f"G1 X{dx_q:.5f} Y{dy_q:.5f} Z{dz_q:.5f} F{f_cmd:.2f}")
+            n_moves += 1
 
-        if abs(dz_q) > 1e-6:
-            raw_safe_accel = min(2500.0, SAFE_Z_CMD_ACCEL * (L_cmd / abs(dz_q)))
-        else:
-            raw_safe_accel = 2500.0
-        for b in (60, 220, 700, 2500):
-            if raw_safe_accel >= b:
-                bucket = b
-        if bucket != cur_accel_bucket:
-            lines.append(f"SET_VELOCITY_LIMIT ACCEL={bucket}")
-            cur_accel_bucket = bucket
+            cum_dx_cmd = round(cum_dx_cmd + dx_q, 5)
+            cum_dy_cmd = round(cum_dy_cmd + dy_q, 5)
+            cum_dz_cmd = round(cum_dz_cmd + dz_q, 5)
+            x_phys = mc.CENTER_X + cum_dx_cmd * scale_xy
+            y_phys = mc.CENTER_Y + cum_dy_cmd * scale_xy
+            z_phys = CENTER_Z + cum_dz_cmd * SCALE_Z
+            min_x, max_x = min(min_x, x_phys), max(max_x, x_phys)
+            min_y, max_y = min(min_y, y_phys), max(max_y, y_phys)
+            min_z, max_z = min(min_z, z_phys), max(max_z, z_phys)
 
-        f_cmd = round((L_cmd / dt) * 60.0, 2)
-        lines.append(f"G1 X{dx_q:.5f} Y{dy_q:.5f} Z{dz_q:.5f} F{f_cmd:.2f}")
-        n_moves += 1
-
-        cum_dx_cmd = round(cum_dx_cmd + dx_q, 5)
-        cum_dy_cmd = round(cum_dy_cmd + dy_q, 5)
-        cum_dz_cmd = round(cum_dz_cmd + dz_q, 5)
-        x_phys = mc.CENTER_X + cum_dx_cmd * scale_xy
-        y_phys = mc.CENTER_Y + cum_dy_cmd * scale_xy
-        z_phys = CENTER_Z + cum_dz_cmd * SCALE_Z
-        min_x, max_x = min(min_x, x_phys), max(max_x, x_phys)
-        min_y, max_y = min(min_y, y_phys), max(max_y, y_phys)
-        min_z, max_z = min(min_z, z_phys), max(max_z, z_phys)
-
-        if pA is not None:
-            last_sA, last_pA = sA, pA
-        if pB is not None:
-            last_sB, last_pB = sB, pB
-        if pZ is not None:
-            last_sZ, last_pZ = best_sZ, pZ
+            if pA is not None:
+                last_sA, last_pA = sA, pA
+            if pB is not None:
+                last_sB, last_pB = sB, pB
+            if pZ is not None:
+                last_sZ, last_pZ = best_sZ, pZ
 
     ret_dx = round(-cum_dx_cmd, 5)
     ret_dy = round(-cum_dy_cmd, 5)
