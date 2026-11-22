@@ -278,7 +278,7 @@ def simulate_channels_with_soundfont(
     # Parse G-code into (t_start, dur_s, hz_A, hz_B, hz_Z)
     events = []
     cur_t = 0.0
-    in_rel = False
+    in_rel = True
     feed = 3000.0
     skip_return = False
 
@@ -455,6 +455,7 @@ def main() -> int:
         "G1 X90.000 Y87.000 Z25.000 F6000",
         "_AUDIO_MODE_COMPACTO_ON",
         "_AUDIO_MODE_Z_ON",
+        "G91",
         *cmds_full,
         "_AUDIO_MODE_Z_OFF",
         "_AUDIO_MODE_OFF",
@@ -477,6 +478,7 @@ def main() -> int:
         "  G1 X90.000 Y87.000 Z25.000 F6000",
         "  _AUDIO_MODE_COMPACTO_ON",
         "  _AUDIO_MODE_Z_ON",
+        "  G91",
         *[f"  {c}" for c in cmds_short],
         "  _AUDIO_MODE_Z_OFF",
         "  _AUDIO_MODE_OFF",
