@@ -724,8 +724,15 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         if self.path.startswith("/api/state"):
             self._send_json(ENGINE.get_state())
+        elif self.path.startswith("/api/soundfont/manifest"):
+            if SOUNDFONT_MANIFEST.exists():
+                self._send_json(json.loads(SOUNDFONT_MANIFEST.read_text()))
+            else:
+                self._send_json({"ok": False, "error": "Manifesto SoundFont ainda nao foi gerado."}, status=404)
+        elif self.path.startswith("/api/soundfont/songs"):
+            self._send_json({"ok": True, "songs": list_musical_songs()})
         else:
-            self._send_json({"ok": True, "service": "VZ180 Belt Tuner API"})
+            self._send_json({"ok": True, "service": "VZ180 Belt Tuner & SoundFont Simulator API"})
 
     def do_POST(self) -> None:
         length = int(self.headers.get("Content-Length", "0"))
