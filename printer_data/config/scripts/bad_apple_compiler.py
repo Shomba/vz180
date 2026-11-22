@@ -387,25 +387,148 @@ def compile_3axis_gcode(
     return lines, stats
 
 
+def arrange_megalovania_3axis(
+    mythic_path: Path,
+    vgmusic_path: Path,
+    max_sec: float | None = 64.0,
+) -> tuple[list[tuple[int, int, int]], list[tuple[int, int, int]], list[tuple[int, int, int]], int, list[tuple[int, int]]]:
+    """
+    Arrange Megalovania for 3 simultaneous axes (Motor A + Motor B + Motor Z):
+      - Motor A (Voice A): Main Lead Melody from megalovania_mythic.mid Track 0 (A#3..F5).
+      - Motor Z (Voice Z):
+          * Bars 0..4 (0..8s): Doubles the opening solo riff on Eixo Z so Z is active from note 1!
+          * Bars 4..72 (8..144s): Plays the relentless Driving Bass Beat (Track 1 of mythic,
+            shifted +12 in bars 4..8 and +24 in bars 8..72 into A#3..D#5, Z's 55-91% clarity zone!)
+            with seamless legato (gap=0) and direction-flip articulation on repeated notes.
+      - Motor B (Voice B):
+          * Bars 0..4 (0..8s): Silent during the opening intro.
+          * Bars 4..8 (8..16s): Doubles the bass pulse entry for extra punch.
+          * Bars 8..72 (16..144s): Plays the 2nd Harmony / Counter-Arpeggio (Track 0 chord harmony
+            + Track 3/7 from megalovania_vgmusic.mid when Track 0 is monophonic).
+    """
+    div, tempos, tracks = mc.parse_midi(mythic_path)
+    t2s = mc.make_tick_to_sec(div, tempos)
+    bar_ticks = div * 4  # 1920 ticks (2.0s at 120 BPM)
+
+    # Use existing phrase-aware lead & harmony extractor from midi_to_corexy
+    lead_notes, bass_and_harm = mc.arrange_megalovania(tracks, div, max_sec=max_sec, t2s=t2s)
+
+    # 1. Voice A: Lead Melody (with slight legato extension on sustained notes, keeping staccato on repeated pitches)
+    vA = make_beat_legato(lead_notes, max_bridge_ticks=10)
+
+    # 2. Voice Z: Opening riff (0..8s) + Driving Bass Beat (8..144s, Track 1 shifted into A#3..D#5)
+    raw_Z: list[tuple[int, int, int]] = []
+    for s, e, p in lead_notes:
+        if s < 4 * bar_ticks:
+            raw_Z.append((s, e, mc.clamp_octave(p, Z_MIN_MIDI, Z_MAX_MIDI)))
+
+    b_by_s: dict[int, list[tuple[int, int, int]]] = {}
+    for s, e, p, _v in tracks[1]:
+        if max_sec is not None and t2s(s) >= max_sec:
+            continue
+        b_by_s.setdefault(s, []).append((s, e, p))
+
+    for s, grp in sorted(b_by_s.items()):
+        grp.sort(key=lambda x: x[2])
+        s0, e0, p0 = grp[-1]
+        bar = s0 // bar_ticks
+        # In bars 4..8 (A#2..D3), +12 -> A#3..D4; in bars 8+ (A#1..D#3), +24 -> A#3..D#5!
+        sh = 12 if bar < 8 else 24
+        p_z = mc.clamp_octave(p0 + sh, Z_MIN_MIDI, Z_MAX_MIDI)
+        raw_Z.append((s0, e0, p_z))
+
+    vZ = make_beat_legato(raw_Z, max_bridge_ticks=16)
+
+    # 3. Voice B: Secondary Harmony from Track 0 dyads + vgmusic Track 3/7 counter-melody (starting at bar 4 = 8.0s)
+    raw_B: list[tuple[int, int, int]] = []
+    # Extract dyad harmonies from Track 0
+    t0_by_s: dict[int, list[tuple[int, int, int]]] = {}
+    for s, e, p, _v in tracks[0]:
+        if max_sec is not None and t2s(s) >= max_sec:
+            continue
+        if s >= 4 * bar_ticks:
+            t0_by_s.setdefault(s, []).append((s, e, p))
+
+    for s, grp in sorted(t0_by_s.items()):
+        if len(grp) > 1:
+            grp.sort(key=lambda x: x[2])
+            s0, e0, p_lo = grp[0]
+            raw_B.append((s0, e0, mc.clamp_octave(p_lo, mc.BASS_MIN_MIDI, mc.LEAD_MAX_MIDI)))
+
+    # Where Track 0 is monophonic (e.g. bars 4..20), fill Voice B with Bass / Counter-arpeggio
+    for s, e, p in bass_and_harm:
+        if s < 4 * bar_ticks:
+            continue
+        if not any(bs < e and be > s for bs, be, _ in raw_B):
+            raw_B.append((s, e, mc.clamp_octave(p, mc.BASS_MIN_MIDI, mc.BASS_MAX_MIDI)))
+
+    vB = make_beat_legato(raw_B, max_bridge_ticks=12)
+    return vA, vB, vZ, div, tempos
+
+
 def main() -> int:
     user_midi = Path("/home/shoomba/printer_data/config/badapple!!midifull.mid")
     midis_dir = Path("/home/shoomba/printer_data/config/scripts/midis")
     out_cfg = Path("/home/shoomba/printer_data/config/macros_music.cfg")
     out_full_gcode = Path("/home/shoomba/printer_data/gcodes/BAD_APPLE_FULL.gcode")
+    out_mega_gcode = Path("/home/shoomba/printer_data/gcodes/MEGALOVANIA_FULL.gcode")
 
-    # 1. Keep MEGALOVANIA at top of macros_music.cfg
-    div_m, tempos_m, trk_m = mc.parse_midi(midis_dir / "megalovania_mythic.mid")
-    t2s_m = mc.make_tick_to_sec(div_m, tempos_m)
-    lead_m, bass_m = mc.arrange_megalovania(trk_m, div_m, max_sec=64.0, t2s=t2s_m)
-    segs_m = mc.build_events(lead_m, bass_m, t2s_m, add_ending_chord=True)
-    lines_m, _ = mc.compile_corexy_gcode(segs_m)
-    mc.write_klipper_macro(
-        out_cfg,
-        "MEGALOVANIA",
-        "Undertale Megalovania 2 vozes CoreXY (4ms_punchy_4x otimizado, 64s tema principal)",
-        lines_m,
-        append=False,
+    # 1. MEGALOVANIA 3-Axis (XY + Z, 64.5s macro + 164.5s full .gcode)
+    vAm, vBm, vZm, div_m, tempos_m = arrange_megalovania_3axis(
+        midis_dir / "megalovania_mythic.mid",
+        midis_dir / "megalovania_vgmusic.mid",
+        max_sec=64.0,
     )
+    lines_m, stats_m = compile_3axis_gcode(vAm, vBm, vZm, div_m, tempos_m)
+    print(f"[MEGALOVANIA 64s 3-Axis XY+Z Macro] {stats_m}")
+    print(
+        f"  Voices -> A(Lead): {mc.midi_to_name(min(p for _,_,p in vAm))}..{mc.midi_to_name(max(p for _,_,p in vAm))} ({len(vAm)}) | "
+        f"B(Harmonia/Baixo): {mc.midi_to_name(min(p for _,_,p in vBm))}..{mc.midi_to_name(max(p for _,_,p in vBm))} ({len(vBm)}) | "
+        f"Z(Batida/Riff Z): {mc.midi_to_name(min(p for _,_,p in vZm))}..{mc.midi_to_name(max(p for _,_,p in vZm))} ({len(vZm)})"
+    )
+    macro_mega = [
+        "[gcode_macro MEGALOVANIA]",
+        "description: Undertale Megalovania 3 eixos XY+Z (+2 oitavas XY, batida/riff no Z, 64s)",
+        "gcode:",
+        '  {% if "xyz" not in printer.toolhead.homed_axes %}',
+        "    G28",
+        "  {% endif %}",
+        "  SAVE_GCODE_STATE NAME=megalovania_state",
+        "  G90",
+        f"  G1 X{mc.CENTER_X:.3f} Y{mc.CENTER_Y:.3f} Z{CENTER_Z:.3f} F6000",
+        "  _AUDIO_MODE_COMPACTO_ON",
+        "  _AUDIO_MODE_Z_ON",
+        "  G91",
+        *[f"  {ln}" for ln in lines_m],
+        "  G90",
+        "  _AUDIO_MODE_Z_OFF",
+        "  _AUDIO_MODE_OFF",
+        "  RESTORE_GCODE_STATE NAME=megalovania_state",
+        "",
+    ]
+    out_cfg.write_text("\n".join(macro_mega))
+
+    vAm_f, vBm_f, vZm_f, div_mf, tempos_mf = arrange_megalovania_3axis(
+        midis_dir / "megalovania_mythic.mid",
+        midis_dir / "megalovania_vgmusic.mid",
+        max_sec=None,
+    )
+    lines_mf, stats_mf = compile_3axis_gcode(vAm_f, vBm_f, vZm_f, div_mf, tempos_mf)
+    print(f"[MEGALOVANIA_FULL.gcode 3-Axis 165s] {stats_mf}")
+    out_mega_gcode.write_text("\n".join([
+        "; Undertale - Megalovania Completa (3 Eixos XY+Z)",
+        "G90",
+        "G28",
+        f"G1 X{mc.CENTER_X:.3f} Y{mc.CENTER_Y:.3f} Z{CENTER_Z:.3f} F6000",
+        "_AUDIO_MODE_COMPACTO_ON",
+        "_AUDIO_MODE_Z_ON",
+        "G91",
+        *lines_mf,
+        "G90",
+        "_AUDIO_MODE_Z_OFF",
+        "_AUDIO_MODE_OFF",
+        "",
+    ]))
 
     # 2. BAD_APPLE (Bars 8..56 = 84.0s at 138 BPM:
     #    8 bars Z solo background beat -> 8 bars Z + A Synth1 hook -> 16 bars Z + A Vocal + B Guitar Verse -> 16 bars Z + A Vocal + B Guitar Chorus!)
