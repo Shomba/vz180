@@ -215,8 +215,8 @@ def slice_batch_notes(
         sp_meas = np.abs(np.fft.rfft(core * np.hanning(len(core)), n=n_fft_meas))
         f_meas = np.fft.rfftfreq(n_fft_meas, d=1.0 / SAMPLE_RATE)
 
-        # Measure energy near fundamental (or dominant harmonic)
-        f1_mask = (f_meas >= target_hz * 0.93) & (f_meas <= target_hz * 1.07)
+        # Measure energy near fundamental (within +/-3.5% = +/-60 cents)
+        f1_mask = (f_meas >= target_hz * 0.965) & (f_meas <= target_hz * 1.035)
         if np.any(f1_mask):
             f1_indices = np.where(f1_mask)[0]
             p_idx = int(f1_indices[int(np.argmax(sp_meas[f1_indices]))])
@@ -664,7 +664,7 @@ def main() -> int:
             for b_idx, batch_midis in enumerate(batches):
                 n_notes = len(batch_midis)
                 gcode = build_axis_batch_gcode(axis, batch_midis, note_dur_s, gap_s)
-                rec_dur = lead_in_s + n_notes * (note_dur_s + gap_s) + 0.45
+                rec_dur = lead_in_s + n_notes * (note_dur_s + gap_s) + 0.85
 
                 rec_holder: list[np.ndarray] = []
                 t_rec = threading.Thread(
