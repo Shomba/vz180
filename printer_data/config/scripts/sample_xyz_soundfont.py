@@ -112,7 +112,23 @@ def spectral_denoise(
     return rec[: len(audio)]
 
 
+def calc_actual_note_dur(axis: str, midi: int, note_dur_s: float) -> float:
+    hz = midi_to_hz(midi)
+    if axis in ("x", "y"):
+        d_cmd = (hz / PULSES_PER_CMD_MM_XY) * note_dur_s
+        dist = math.hypot(0.5 * d_cmd, 0.5 * d_cmd)
+        accel = 3000.0
+    else:
+        dist = (hz / PULSES_PER_CMD_MM_Z) * note_dur_s
+        accel = 60.0
+    v = dist / note_dur_s
+    if (v * v) / accel <= dist:
+        return note_dur_s + (v / accel)
+    return 2.0 * math.sqrt(dist / accel)
+
+
 def slice_batch_notes(
+    axis: str,
     batch_audio: np.ndarray,
     midis: list[int],
     lead_in_s: float,
@@ -122,22 +138,41 @@ def slice_batch_notes(
     hp_sos: np.ndarray,
 ) -> list[tuple[int, np.ndarray, dict]]:
     """
-    Locate each note in a recorded batch using narrow-band harmonic energy around target_hz,
-    extract the clean note waveform, and compute acoustic metrics + loop points.
+    Locate each note in a recorded batch using first-note onset + exact kinematic trapezoid timing
+    + narrow-band harmonic energy refinement around target_hz.
     """
     clean_full = spectral_denoise(batch_audio, noise_mag_profile, hp_sos)
-    stride_s = note_dur_s + gap_s
     win_size = 1024
     hop = 240  # 5 ms hop @ 48 kHz
     hann = np.hanning(win_size)
     fft_freqs = np.fft.rfftfreq(win_size, d=1.0 / SAMPLE_RATE)
 
+    # Detect actual acoustic onset of Note 0 in the buffer
+    env_hop = 240
+    n_env = max(1, (len(clean_full) - env_hop) // env_hop)
+    rms_env = np.array([
+        float(np.sqrt(np.mean(clean_full[i * env_hop : (i + 1) * env_hop] ** 2)))
+        for i in range(n_env)
+    ])
+    noise_floor = float(np.percentile(rms_env, 18) + 1e-6)
+    peak_env = float(np.max(rms_env) + 1e-6)
+    thresh = max(noise_floor * 3.2, peak_env * 0.14)
+    above = np.where(rms_env >= thresh)[0]
+    if len(above) > 0:
+        first_onset_s = max(0.02, float(above[0] * env_hop) / SAMPLE_RATE)
+    else:
+        first_onset_s = lead_in_s
+
+    cum_t = first_onset_s
     results = []
     for idx, midi in enumerate(midis):
         target_hz = midi_to_hz(midi)
-        expected_start_s = lead_in_s + idx * stride_s
-        search_t0 = max(0.02, expected_start_s - 0.22)
-        search_t1 = min(len(clean_full) / SAMPLE_RATE - 0.05, expected_start_s + note_dur_s + 0.28)
+        expected_start_s = cum_t
+        actual_dur_s = calc_actual_note_dur(axis, midi, note_dur_s)
+        cum_t += actual_dur_s + gap_s
+
+        search_t0 = max(0.01, expected_start_s - 0.12)
+        search_t1 = min(len(clean_full) / SAMPLE_RATE - 0.02, expected_start_s + actual_dur_s + 0.14)
 
         s0 = int(search_t0 * SAMPLE_RATE)
         s1 = int(search_t1 * SAMPLE_RATE)
