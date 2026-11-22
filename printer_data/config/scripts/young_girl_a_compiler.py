@@ -449,7 +449,7 @@ def main() -> int:
     # Save YOUNG_GIRL_A_FULL.gcode
     full_lines = [
         "; Siinamota - Young Girl A (Shoujo A / 少女A) — 3 Eixos (A=Vocal, B=Instrumentos, Z=Percussao)",
-        f"; Duracao: {stats_full['duration_s']}s | Movimentos: {stats_full['moves']} | Bounding Box: X[{stats_full['x_min']}..{stats_full['x_max']}] Y[{stats_full['y_min']}..{stats_full['y_max']}] Z[{stats_full['z_min']}..{stats_full['z_max']}]",
+        f"; Duracao: {stats_full['duration_s']}s | Movimentos: {stats_full['moves']} | Bounding Box: X{stats_full['x_phys_range']} Y{stats_full['y_phys_range']} Z{stats_full['z_phys_range']}",
         "G28",
         "G90",
         "G1 X90.000 Y87.000 Z25.000 F6000",
