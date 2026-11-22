@@ -680,6 +680,7 @@ def main() -> int:
                 t_rec.join(timeout=rec_dur + 3.0)
 
                 sliced = slice_batch_notes(
+                    axis,
                     rec_holder[0],
                     batch_midis,
                     lead_in_s,
