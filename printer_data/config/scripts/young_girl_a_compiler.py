@@ -421,20 +421,208 @@ def simulate_channels_with_soundfont(
     return saved_paths
 
 
+def compile_3axis_gcode_halfmoon(
+    voice_A: list[tuple[int, int, int]],
+    voice_B: list[tuple[int, int, int]],
+    voice_Z: list[tuple[int, int, int]],
+    div_h: int,
+    tempos_h: list[tuple[int, int]],
+) -> tuple[list[str], dict]:
+    """
+    Compila os 3 eixos (A, B, Z) guiando a direcao (+1/-1) de cada nota musical — SEM nenhuma
+    viagem extra fora da musica — para que:
+      1. Durante Intro + Verso (0..51.7s): a cabeca fique posicionada no canto das 1:30
+         (X=132.43, Y=129.43, raio 60mm a +45 deg do centro 90,87).
+      2. Durante a Ponte antes do Refrao (51.7s..66.46s): as proprias notas vocais desenhem
+         uma meia-lua de raio 60 mm no sentido horario das 1:30 (+45 deg) ate as 7:30 (-135 deg,
+         X=47.57, Y=44.57), chegando as 7:30 exatamente na entrada do Refrao Final!
+      3. Durante o Refrao Final (66.46s..103.5s): a cabeca dance ao redor do canto das 7:30.
+    """
+    import midi_to_corexy as mc
+
+    t2s = mc.make_tick_to_sec(div_h, tempos_h)
+    scale_xy = 4.0
+    scale_z = 16.0
+    pulses_xy = 80.0
+    pulses_z = 1200.00075
+    SAFE_Z_CMD_ACCEL = 60.0
+
+    CX, CY, R = 90.0, 87.0, 60.0
+    T_ARC_START = 51.0
+    T_ARC_END = 66.46
+
+    def get_target_xy(t_sec: float) -> tuple[float, float, bool]:
+        if t_sec <= T_ARC_START:
+            ang = math.radians(45.0)   # 1:30
+            return (CX + R * math.cos(ang), CY + R * math.sin(ang), False)
+        if t_sec >= T_ARC_END:
+            ang = math.radians(-135.0)  # 7:30
+            return (CX + R * math.cos(ang), CY + R * math.sin(ang), False)
+        u = (t_sec - T_ARC_START) / (T_ARC_END - T_ARC_START)
+        ang = math.radians(45.0 - 180.0 * u)  # Clockwise 1:30 -> 3:00 -> 4:30 -> 6:00 -> 7:30
+        return (CX + R * math.cos(ang), CY + R * math.sin(ang), True)
+
+    ticks = set()
+    for v in (voice_A, voice_B, voice_Z):
+        for s, e, _ in v:
+            ticks.add(s)
+            ticks.add(e)
+    sorted_ticks = sorted(ticks)
+
+    segments = []
+    iA = iB = iZ = 0
+    for i in range(len(sorted_ticks) - 1):
+        tk0, tk1 = sorted_ticks[i], sorted_ticks[i + 1]
+        dt = t2s(tk1) - t2s(tk0)
+        if dt < 0.005:
+            continue
+        tm = 0.5 * (tk0 + tk1)
+        while iA < len(voice_A) and voice_A[iA][1] <= tk0:
+            iA += 1
+        while iB < len(voice_B) and voice_B[iB][1] <= tk0:
+            iB += 1
+        while iZ < len(voice_Z) and voice_Z[iZ][1] <= tk0:
+            iZ += 1
+        pA = voice_A[iA][2] if (iA < len(voice_A) and voice_A[iA][0] <= tm < voice_A[iA][1]) else None
+        pB = voice_B[iB][2] if (iB < len(voice_B) and voice_B[iB][0] <= tm < voice_B[iB][1]) else None
+        pZ = voice_Z[iZ][2] if (iZ < len(voice_Z) and voice_Z[iZ][0] <= tm < voice_Z[iZ][1]) else None
+        segments.append((t2s(tk0), t2s(tk1), pA, pB, pZ))
+
+    start_x, start_y, _ = get_target_xy(0.0)
+    x_phys, y_phys, z_phys = start_x, start_y, 25.0
+    cum_dx = cum_dy = cum_dz = 0.0
+    min_x = max_x = x_phys
+    min_y = max_y = y_phys
+    min_z = max_z = z_phys
+    cur_accel_bucket = -1
+    lines: list[str] = []
+    n_moves = n_rests = 0
+
+    for t0, t1, pA, pB, pZ in segments:
+        dt = t1 - t0
+        if pA is None and pB is None and pZ is None:
+            ms = int(round(dt * 1000.0))
+            if ms >= 5:
+                lines.append(f"G4 P{ms}")
+                n_rests += 1
+            continue
+
+        fA = mc.midi_to_hz(pA) if pA is not None else 0.0
+        fB = mc.midi_to_hz(pB) if pB is not None else 0.0
+        fZ = mc.midi_to_hz(pZ) if pZ is not None else 0.0
+
+        in_arc = (t1 >= T_ARC_START and t0 <= T_ARC_END)
+        n_sub = max(1, int(math.ceil(dt / 0.11))) if in_arc else 1
+        sub_dt = dt / n_sub
+
+        for k in range(n_sub):
+            tk_end = t0 + (k + 1) * sub_dt
+            tx, ty, is_arc_now = get_target_xy(tk_end)
+            magA = (fA / pulses_xy) * sub_dt
+            magB = (fB / pulses_xy) * sub_dt
+            magZ = (fZ / pulses_z) * sub_dt
+
+            best_c = 1e18
+            best_dx = best_dy = 0.0
+            for sA in ([-1, 1] if magA > 0 else [0]):
+                for sB in ([-1, 1] if magB > 0 else [0]):
+                    dx_c = 0.5 * (sA * magA + sB * magB)
+                    dy_c = 0.5 * (sA * magA - sB * magB)
+                    nx = x_phys + dx_c * scale_xy
+                    ny = y_phys + dy_c * scale_xy
+                    if nx < 15.0 or nx > 165.0 or ny < 15.0 or ny > 160.0:
+                        c = 1e9 + abs(nx - CX) + abs(ny - CY)
+                    else:
+                        c = (nx - tx) ** 2 + (ny - ty) ** 2
+                        if is_arc_now:
+                            # Keep tightly glued to the R=60mm semicircle!
+                            r_err = math.hypot(nx - CX, ny - CY) - R
+                            c += 2.5 * (r_err ** 2)
+                    if c < best_c:
+                        best_c = c
+                        best_dx, best_dy = dx_c, dy_c
+
+            best_dz = 0.0
+            if magZ > 0:
+                dz_p = magZ * scale_z
+                if z_phys + dz_p > 34.0:
+                    best_dz = -magZ
+                elif z_phys - dz_p < 16.0:
+                    best_dz = magZ
+                else:
+                    best_dz = magZ if z_phys <= 25.0 else -magZ
+
+            dx_q = round(best_dx, 5)
+            dy_q = round(best_dy, 5)
+            dz_q = round(best_dz, 5)
+            L_cmd = math.sqrt(dx_q * dx_q + dy_q * dy_q + dz_q * dz_q)
+            if L_cmd < 1e-6:
+                continue
+
+            if abs(dz_q) > 1e-6:
+                raw_safe_accel = min(3000.0, SAFE_Z_CMD_ACCEL * (L_cmd / abs(dz_q)))
+            else:
+                raw_safe_accel = 3000.0
+            bucket = 60
+            for b in (60, 250, 900, 3000):
+                if raw_safe_accel >= b:
+                    bucket = b
+            if bucket != cur_accel_bucket:
+                lines.append(f"SET_VELOCITY_LIMIT ACCEL={bucket}")
+                cur_accel_bucket = bucket
+
+            f_cmd = round((L_cmd / sub_dt) * 60.0, 2)
+            lines.append(f"G1 X{dx_q:.5f} Y{dy_q:.5f} Z{dz_q:.5f} F{f_cmd:.2f}")
+            n_moves += 1
+
+            cum_dx = round(cum_dx + dx_q, 5)
+            cum_dy = round(cum_dy + dy_q, 5)
+            cum_dz = round(cum_dz + dz_q, 5)
+            x_phys = start_x + cum_dx * scale_xy
+            y_phys = start_y + cum_dy * scale_xy
+            z_phys = 25.0 + cum_dz * scale_z
+            min_x, max_x = min(min_x, x_phys), max(max_x, x_phys)
+            min_y, max_y = min(min_y, y_phys), max(max_y, y_phys)
+            min_z, max_z = min(min_z, z_phys), max(max_z, z_phys)
+
+    # Return cleanly to exact start position inside audio mode so Klipper coords stay 100% synced
+    lines.append("; Retorno exato a origem (1:30) para preservar coordenadas")
+    if abs(cum_dz) > 1e-5:
+        lines.append("SET_VELOCITY_LIMIT ACCEL=60")
+        lines.append(f"G1 Z{-cum_dz:.5f} F120")
+    if abs(cum_dx) > 1e-5 or abs(cum_dy) > 1e-5:
+        lines.append("SET_VELOCITY_LIMIT ACCEL=1500")
+        lines.append(f"G1 X{-cum_dx:.5f} Y{-cum_dy:.5f} F2400")
+    lines.append("G90")
+    lines.append("M400")
+
+    stats = {
+        "moves": n_moves,
+        "rests": n_rests,
+        "duration_s": round(segments[-1][1] if segments else 0.0, 1),
+        "start_xy": (round(start_x, 2), round(start_y, 2)),
+        "x_phys_range": (round(min_x, 1), round(max_x, 1)),
+        "y_phys_range": (round(min_y, 1), round(max_y, 1)),
+        "z_phys_range": (round(min_z, 2), round(max_z, 2)),
+    }
+    return lines, stats
+
+
 def main() -> int:
     vA, vB, vZ = build_tracks_from_os3710759()
     print(f"[OS3710759] Notas extraidas: A (Vocal+Intro)={len(vA)} | B (Guitarra+Ponte)={len(vB)} | Z (Bateria+Ponte)={len(vZ)}", flush=True)
 
-    cmds, stats = bac.compile_3axis_gcode(vA, vB, vZ, DIV, TEMPOS)
-    print(f"[OS3710759] Compilado 3 Eixos: {stats}", flush=True)
+    cmds, stats = compile_3axis_gcode_halfmoon(vA, vB, vZ, DIV, TEMPOS)
+    print(f"[OS3710759] Compilado Meia-Lua 60mm (1:30 -> 7:30): {stats}", flush=True)
+    sx, sy = stats["start_xy"]
 
-    # Save YOUNG_GIRL_A_FULL.gcode (full 103.4s from OnlineSequencer 3710759)
+    # Save YOUNG_GIRL_A_FULL.gcode (full 103.5s from OnlineSequencer 3710759)
     full_lines = [
-        "; Siinamota - Young Girl A (OnlineSequencer #3710759) — 3 Eixos (A=Vocal, B=Guitarra, Z=Bateria + Ponte 3 Oitavas)",
+        "; Siinamota - Young Girl A (OnlineSequencer #3710759) — 3 Eixos + Meia-Lua R=60mm (1:30 -> 7:30)",
         f"; Duracao: {stats['duration_s']}s | Movimentos: {stats['moves']} | Bounding Box: X{stats['x_phys_range']} Y{stats['y_phys_range']} Z{stats['z_phys_range']}",
         "G28",
         "G90",
-        "G1 X90.000 Y87.000 Z25.000 F6000",
+        f"G1 X{sx:.3f} Y{sy:.3f} Z25.000 F6000",
         "_AUDIO_MODE_COMPACTO_ON",
         "_AUDIO_MODE_Z_ON",
         "G91",
@@ -450,14 +638,14 @@ def main() -> int:
     # Update [gcode_macro YOUNG_GIRL_A] in macros_music.cfg
     macro_block = "\n".join([
         "[gcode_macro YOUNG_GIRL_A]",
-        "description: Siinamota - Young Girl A (OS#3710759: A=Vocal, B=Guitarra, Z=Bateria, Ponte 3 Oitavas, 103s)",
+        "description: Siinamota - Young Girl A (OS#3710759: A=Vocal, B=Guitarra, Z=Bateria, Meia-Lua 60mm 1:30->7:30)",
         "gcode:",
         '  {% if "xyz" not in printer.toolhead.homed_axes %}',
         "    G28",
         "  {% endif %}",
         "  SAVE_GCODE_STATE NAME=young_girl_a_state",
         "  G90",
-        "  G1 X90.000 Y87.000 Z25.000 F6000",
+        f"  G1 X{sx:.3f} Y{sy:.3f} Z25.000 F6000",
         "  _AUDIO_MODE_COMPACTO_ON",
         "  _AUDIO_MODE_Z_ON",
         "  G91",
