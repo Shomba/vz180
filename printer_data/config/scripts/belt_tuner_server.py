@@ -815,6 +815,31 @@ class Handler(BaseHTTPRequestHandler):
                     self._send_json({"ok": False, "error": f"Acao desconhecida: {act}"}, status=400)
             except Exception as e:
                 self._send_json({"ok": False, "error": str(e)}, status=500)
+
+        elif self.path.startswith("/api/soundfont/parse_gcode"):
+            song_id = str(payload.get("song_id", ""))
+            raw_gcode = str(payload.get("gcode", ""))
+            title = str(payload.get("title", "G-Code Personalizado"))
+            try:
+                if song_id.startswith("file:"):
+                    fname = song_id.split(":", 1)[1]
+                    fpath = GCODES_DIR / Path(fname).name
+                    if not fpath.exists():
+                        self._send_json({"ok": False, "error": f"Arquivo nao encontrado: {fname}"}, status=404)
+                        return
+                    raw_gcode = fpath.read_text(errors="ignore")
+                    title = fname
+                elif song_id.startswith("macro:"):
+                    _, cfg_name, macro_name = song_id.split(":", 2)
+                    raw_gcode = extract_macro_gcode(cfg_name, macro_name)
+                    title = f"Macro {macro_name}"
+                if not raw_gcode.strip():
+                    self._send_json({"ok": False, "error": "G-Code vazio."}, status=400)
+                    return
+                res = parse_musical_gcode_text(raw_gcode, title=title)
+                self._send_json(res)
+            except Exception as e:
+                self._send_json({"ok": False, "error": str(e)}, status=500)
         else:
             self._send_json({"ok": False, "error": "Not found"}, status=404)
 
