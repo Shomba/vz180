@@ -482,7 +482,7 @@ def hz_to_midi_float(hz: float) -> float:
 def list_musical_songs() -> list[dict]:
     songs = []
     for gf in sorted(GCODES_DIR.glob("*.gcode")):
-        if any(k in gf.name.upper() for k in ("MEGALOVANIA", "BAD_APPLE", "BOHEMIAN", "BUDDY", "WEEZER", "MUSIC", "AUDIO")):
+        if any(k in gf.name.upper() for k in ("MEGALOVANIA", "BAD_APPLE", "BOHEMIAN", "BUDDY", "WEEZER", "YOUNG", "SHOUJO", "MUSIC", "AUDIO")):
             songs.append({
                 "id": f"file:{gf.name}",
                 "title": f"{gf.name} (G-Code Completo)",
