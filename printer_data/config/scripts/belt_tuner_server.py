@@ -91,6 +91,14 @@ class BeltTunerEngine:
         self.spec_mask = (full_freqs >= F_MIN_SPEC) & (full_freqs <= F_MAX_SPEC)
         self.freqs = full_freqs[self.spec_mask]
 
+        # Wide-band musical spectrum mask (90..1050 Hz) for the Virtual XYZ Instrument
+        self.music_mask = (full_freqs >= 90.0) & (full_freqs <= 1050.0)
+        self.music_freqs = full_freqs[self.music_mask]
+        self.music_live_hz: float = 0.0
+        self.music_live_note: str = "--"
+        self.music_live_db: float = -60.0
+        self.music_spectrum: list[float] = [0.0] * len(self.music_freqs[::8])
+
         # Settings & calibration state
         self.noise_spec: np.ndarray | None = None
         self.noise_rms_db: float = -45.0

@@ -202,11 +202,9 @@ def compile_3axis_gcode(
 ) -> tuple[list[str], dict]:
     t2s = mc.make_tick_to_sec(div_h, tempos_h)
     scale_xy = orig_ms_xy / float(target_ms_xy)  # 4.0
-    # +2 oitavas em XY (4x frequencia/velocidade: 1 passo inteiro = 4 micropassos por ciclo de f_target!)
-    xy_octave_mult = 4.0
-    pulses_per_cmd_mm_xy = ((200.0 * orig_ms_xy) / rot_xy) / xy_octave_mult  # 80.0 / 4.0 = 20.0
-    min_x_box, max_x_box = 18.0, 162.0
-    min_y_box, max_y_box = 18.0, 156.0
+    pulses_per_cmd_mm_xy = (200.0 * orig_ms_xy) / rot_xy  # 80.0 (movimento compacto ~15-25mm no centro)
+    min_x_box, max_x_box = mc.MIN_X, mc.MAX_X
+    min_y_box, max_y_box = mc.MIN_Y, mc.MAX_Y
 
     ticks = set()
     for v in (voice_A, voice_B, voice_Z):
@@ -270,9 +268,9 @@ def compile_3axis_gcode(
         fB = mc.midi_to_hz(pB) if pB is not None else 0.0
         fZ = mc.midi_to_hz(pZ) if pZ is not None else 0.0
 
-        # Sub-divide any long note that would exceed 65 mm belt travel at +2 octaves
-        max_belt_phys = max(fA, fB) * 0.2 * dt
-        n_sub = max(1, int(math.ceil(max_belt_phys / 65.0)))
+        # Sub-divide any long note that would exceed 50 mm belt travel
+        max_belt_phys = max(fA, fB) * 0.05 * dt
+        n_sub = max(1, int(math.ceil(max_belt_phys / 50.0)))
         sub_dt = dt / n_sub
 
         for sub_i in range(n_sub):
